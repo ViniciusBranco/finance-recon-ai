@@ -1,0 +1,46 @@
+import uuid
+from datetime import datetime
+from decimal import Decimal
+from typing import Optional
+from sqlalchemy import String, Numeric, DateTime, ForeignKey, Text, Date, Float
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import UUID
+
+class Base(DeclarativeBase):
+    pass
+
+class FinancialDocument(Base):
+    __tablename__ = "financial_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    original_filename: Mapped[str] = mapped_column(String, nullable=False, server_default="unknown.pdf")
+    file_hash: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True)
+    doc_type: Mapped[str] = mapped_column(String, nullable=False) # RECEIPT, BANK_STATEMENT, UNKNOWN
+    status: Mapped[str] = mapped_column(String, default="PENDING") # PENDING, PROCESSED, ERROR
+    raw_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    
+    transactions: Mapped[list["Transaction"]] = relationship(
+        back_populates="document", 
+        cascade="all, delete-orphan",
+        foreign_keys="[Transaction.document_id]"
+    )
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("financial_documents.id"), nullable=False)
+    merchant_name: Mapped[str] = mapped_column(String, nullable=False)
+    date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # Reconciliation fields
+    receipt_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("financial_documents.id"), nullable=True)
+    match_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    match_type: Mapped[Optional[str]] = mapped_column(String, nullable=True) # AUTO, MANUAL
+
+    document: Mapped["FinancialDocument"] = relationship(foreign_keys=[document_id], back_populates="transactions")
+    receipt: Mapped[Optional["FinancialDocument"]] = relationship(foreign_keys=[receipt_id])

@@ -1,0 +1,34 @@
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+from app.core.config import settings
+from app.api.endpoints import reconciliation
+
+
+
+app = FastAPI(title=settings.PROJECT_NAME, version="0.1.0")
+
+# CORS Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Ou ["http://localhost:5173"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register Routers
+app.include_router(reconciliation.router, prefix="/api/v1/recon", tags=["Reconciliation"])
+
+@app.get("/")
+async def root():
+    return {"message": "Finance Recon AI Backend is running"}
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy", 
+        "config": {
+            "db_configured": bool(settings.DATABASE_URL),
+            "ollama_url": settings.OLLAMA_BASE_URL
+        }
+    }
