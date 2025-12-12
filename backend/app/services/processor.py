@@ -53,31 +53,122 @@ def parse_xml(state: ProcessingState) -> ProcessingState:
         return {**state, "error": f"XML Parsing failed: {str(e)}"}
 
 def parse_csv(state: ProcessingState) -> ProcessingState:
-    """Parses CSV and prepares context for LLM if necessary."""
+    """Parses CSV and extracts transactions directly using Pandas (Bypassing LLM)."""
     try:
-        df = pd.read_csv(state["file_path"])
-        # Take first 5 rows to understand context
-        content_preview = df.head(5).to_string()
+        file_path = state["file_path"]
+        df = None
         
-        # For CSV, we pass the content to the LLM to understand if it's a statement or something else
-        # Or we could extract deterministically if the format is known.
-        # Following instructions: "CSV -> parse_csv -> structure_with_llm"
-        # We'll store the content in a temporary way or update 'extracted_data' partially so LLM can pick it up?
-        # The instruction says "structure_with_llm" uses "Analyze the following text".
-        # So we'll put the CSV content into a 'raw_text' convention field or pass it via state context not defined in TypedDict yet?
-        # The TypedDict definition in instructions didn't have 'raw_text', but 'extracted_data.raw_content' exists.
-        # But 'structure_with_llm' expects text. Let's assume we can add 'raw_text' to the TypedDict or reuse 'error' (bad practice).
-        # Better: let's stick to the schema provided in instructions.
-        # But wait, instruction #2 said ProcessingState has `file_path`, `password`, `file_extension`, `extracted_data`, `error`.
-        # It missed `raw_text`. I should probably have added `raw_text` to ProcessingState to facilitate data passing between nodes.
-        # I'll implicitly assume the previous node returns it to be used by the next.
-        # Let's return it as part of 'extracted_data' with raw_content populated, effectively acting as the carrier.
+        # 1. Detect Encoding & Separator
+        encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']
+        separators = [',', ';', '\t']
         
+        for enc in encodings:
+            try:
+                # Try sniffing with python engine
+                temp_df = pd.read_csv(file_path, sep=None, engine='python', encoding=enc, nrows=5)
+                # If we have at least 1 column, it's a good start
+                if len(temp_df.columns) > 0:
+                    # Re-read full file
+                    df = pd.read_csv(file_path, sep=None, engine='python', encoding=enc)
+                    break
+            except Exception:
+                continue
+                
+        if df is None:
+             # Fallback: specific common formatted tries
+             for enc in encodings:
+                 for sep in separators:
+                     try:
+                        df = pd.read_csv(file_path, sep=sep, encoding=enc)
+                        if len(df.columns) > 1: # Heuristic
+                            break
+                     except:
+                        continue
+                 if df is not None: break
+        
+        if df is None:
+            return {**state, "error": "CSV Parsing failed: Could not determine encoding/separator."}
+            
+        # 2. Normalize Columns
+        # Remove BOM artifacts explicitly if encoding didn't catch it
+        df.columns = [str(c).lower().strip().replace('\ufeff', '') for c in df.columns]
+        
+        # 3. Flexible Mapping
+        # Map: ['data', 'date'], ['valor', 'value', 'amount'], ['descrição', 'description', 'memo']
+        col_map = {
+            'date': ['data', 'date', 'dt'],
+            'amount': ['valor', 'value', 'amount', 'amt'],
+            'description': ['descrição', 'description', 'memo', 'historico', 'merchant', 'estabelecimento', 'loja']
+        }
+        
+        found_cols = {}
+        for target, aliases in col_map.items():
+            for alias in aliases:
+                if alias in df.columns:
+                    found_cols[target] = alias
+                    break
+                    
+        # Validade Critical Columns
+        if not found_cols.get('date') or not found_cols.get('amount'):
+             # If mapping failed, maybe it's headerless? 
+             # For now, return error or fallback to basic 0,1,2 index if needed.
+             # Instructions imply column mapping.
+             # Let's try to be smart? No, strict to instructions "Look for...".
+             return {**state, "error": f"CSV Invalid: Missing columns. Found: {list(df.columns)}"}
+        
+        # 4. Extract Transactions
+        transactions = []
+        for _, row in df.iterrows():
+            try:
+                # Date Parsing
+                raw_date = row[found_cols['date']]
+                dt_obj = pd.to_datetime(raw_date, dayfirst=True, errors='coerce')
+                if pd.isna(dt_obj):
+                    continue
+                date_str = dt_obj.strftime("%Y-%m-%d")
+                
+                # Amount Parsing
+                raw_amount = row[found_cols['amount']]
+                if isinstance(raw_amount, str):
+                    # Handle "R$ 1.000,00" -> 1000.00
+                    # Handle "1,000.00" -> 1000.00
+                    cln = raw_amount.replace('R$', '').replace(' ', '')
+                    if ',' in cln and '.' in cln:
+                        # Ambiguous? Assume Brazil: dot=thousand, comma=decimal
+                        if cln.rfind(',') > cln.rfind('.'):
+                            cln = cln.replace('.', '').replace(',', '.')
+                    elif ',' in cln:
+                         # Assume comma decimal
+                         cln = cln.replace(',', '.')
+                    amount = float(cln)
+                else:
+                    amount = float(raw_amount)
+                
+                # Description
+                desc = "CSV Import"
+                if 'description' in found_cols:
+                    desc_val = row[found_cols['description']]
+                    if pd.notna(desc_val):
+                        desc = str(desc_val)
+                
+                transactions.append({
+                    "date": date_str,
+                    "amount": amount, 
+                    "merchant_or_bank": desc,
+                    "description": desc,
+                    "currency": "BRL"
+                })
+            except Exception:
+                continue
+
+        # 5. Create Document
         doc = FinancialDocument(
-            file_name=os.path.basename(state["file_path"]),
-            doc_type="UNKNOWN", # LLM will decide
-            raw_content=content_preview
+            file_name=os.path.basename(file_path),
+            doc_type="BANK_STATEMENT", # CSV is typically a statement
+            raw_content="CSV Parsed via Pandas",
+            transactions=transactions
         )
+        
         return {**state, "extracted_data": doc}
         
     except Exception as e:
@@ -208,7 +299,7 @@ workflow.add_conditional_edges(
 workflow.add_edge("parse_xml", END)
 
 # CSV goes to extraction
-workflow.add_edge("parse_csv", "extract_structured_data")
+workflow.add_edge("parse_csv", END)
 
 # PDF goes to extraction if successful
 workflow.add_conditional_edges(
@@ -334,7 +425,11 @@ async def process_document(file_path: str, password: str = None, file_hash: str 
                                 merchant_name=t_desc or "Unknown",
                                 date=txn_date_obj,
                                 amount=t_amount or 0.0,
-                                category="General"
+                                category="General",
+                                # Reset Match State
+                                receipt_id=None,
+                                match_score=None,
+                                match_type=None
                             )
                             session.add(new_txn)
                         except Exception:
@@ -356,7 +451,11 @@ async def process_document(file_path: str, password: str = None, file_hash: str 
                                 merchant_name=t_desc,
                                 date=txn_date_obj,
                                 amount=t_amount,
-                                category="Receipt"
+                                category="Receipt",
+                                # Reset Match State
+                                receipt_id=None,
+                                match_score=None,
+                                match_type=None
                          )
                          session.add(new_txn)
             

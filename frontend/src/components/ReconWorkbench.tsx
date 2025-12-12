@@ -1,12 +1,23 @@
 import React, { useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useDropzone } from 'react-dropzone';
-import { getDocuments, getTransactions, triggerReconciliation, deleteDocument, resetWorkspace, uploadDocument } from '../lib/api';
+import {
+    getDocuments,
+    getTransactions,
+    triggerReconciliation,
+    deleteDocument,
+    resetWorkspace,
+    uploadDocument,
+    manualMatch
+} from '../lib/api';
 import type { Transaction, FinancialDocument, ReconciliationStats } from '../lib/api';
-import { RefreshCw, CheckCircle, FileText, Link as LinkIcon, Trash2, Upload, Loader2, AlertCircle } from 'lucide-react';
+import { RefreshCw, CheckCircle, FileText, Link as LinkIcon, Trash2, Upload, Loader2, AlertCircle, AlertTriangle } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { toast } from 'sonner';
+import { DndContext, useDraggable, useDroppable, DragOverlay } from '@dnd-kit/core';
+import type { DragEndEvent, DragStartEvent } from '@dnd-kit/core';
+import { CSS } from '@dnd-kit/utilities';
 
 function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs));
@@ -20,6 +31,139 @@ const formatDate = (dateString: string) => {
 const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(amount);
 };
+
+// --- Drag & Drop Components ---
+
+interface DraggableReceiptProps {
+    doc: FinancialDocument;
+    isLinked: boolean;
+    onDelete: (id: string) => void;
+}
+
+const DraggableReceipt: React.FC<DraggableReceiptProps> = ({ doc, isLinked, onDelete }) => {
+    const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+        id: doc.id,
+        data: doc,
+        disabled: isLinked
+    });
+
+    const style = {
+        transform: CSS.Translate.toString(transform),
+        zIndex: isDragging ? 100 : undefined,
+        opacity: isDragging ? 0.5 : 1
+    };
+
+    const receiptTx = doc.transactions?.[0];
+
+    return (
+        <div
+            ref={setNodeRef}
+            style={style}
+            {...listeners}
+            {...attributes}
+            className={cn(
+                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group cursor-grab active:cursor-grabbing",
+                isLinked && "opacity-75 cursor-default"
+            )}
+        >
+            <div className="flex items-start gap-3">
+                <div className="p-2 bg-purple-50 dark:bg-purple-900/20 rounded-lg text-purple-600 dark:text-purple-400">
+                    <FileText className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-start">
+                        <p className="font-medium text-slate-900 dark:text-slate-100 truncate pr-2" title={doc.original_filename || doc.filename}>
+                            {doc.original_filename || doc.filename}
+                        </p>
+                        <div className="flex items-center gap-2">
+                            {isLinked && (
+                                <span className="flex-shrink-0 inline-flex items-center rounded-md bg-purple-50 px-2 py-1 text-xs font-medium text-purple-700 ring-1 ring-inset ring-purple-700/10 dark:bg-purple-400/10 dark:text-purple-400 dark:ring-purple-400/30">
+                                    Linked
+                                </span>
+                            )}
+                            <button
+                                onPointerDown={(e) => e.stopPropagation()} // Prevent drag start match on delete
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (confirm('Delete this document?')) onDelete(doc.id);
+                                }}
+                                className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-slate-400 hover:text-red-500 rounded"
+                                title="Delete"
+                            >
+                                <Trash2 className="w-4 h-4" />
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="mt-1 flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">
+                        {receiptTx ? (
+                            <>
+                                <span>{formatDate(receiptTx.date)}</span>
+                                <span className="text-slate-300 dark:text-slate-700">•</span>
+                                <span className="font-mono">{formatCurrency(receiptTx.amount)}</span>
+                            </>
+                        ) : (
+                            <span className="italic opacity-70">No specific data extracted</span>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+interface DroppableTransactionProps {
+    transaction: Transaction;
+    isMatched: boolean;
+    linkedDoc: FinancialDocument | undefined;
+}
+
+const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction: tx, isMatched, linkedDoc }) => {
+    const { setNodeRef, isOver } = useDroppable({
+        id: tx.id,
+        disabled: isMatched
+    });
+
+    return (
+        <li
+            ref={setNodeRef}
+            className={cn(
+                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group border-l-4",
+                isMatched
+                    ? "bg-emerald-50/30 dark:bg-emerald-900/10 border-emerald-500"
+                    : "border-transparent bg-white dark:bg-slate-900",
+                isOver && !isMatched && "bg-blue-50 dark:bg-blue-900/20 border-blue-500 ring-1 ring-inset ring-blue-500/20"
+            )}
+        >
+            <div className="flex justify-between items-start mb-1">
+                <span className="font-medium text-slate-900 dark:text-slate-100 line-clamp-1" title={tx.merchant_name}>
+                    {tx.merchant_name}
+                </span>
+                <span className={cn(
+                    "font-mono font-semibold",
+                    tx.amount < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
+                )}>
+                    {formatCurrency(tx.amount)}
+                </span>
+            </div>
+            <div className="flex justify-between items-center text-sm text-slate-500 dark:text-slate-400">
+                <span>{formatDate(tx.date)}</span>
+
+                {isMatched ? (
+                    <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800">
+                        <LinkIcon className="w-3 h-3" />
+                        {linkedDoc ? `Linked: ${linkedDoc.original_filename || linkedDoc.filename}` : `Matched (${(tx.match_score! * 100).toFixed(0)}%)`}
+                    </div>
+                ) : (
+                    <span className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">
+                        Unlinked
+                    </span>
+                )}
+            </div>
+        </li>
+    );
+};
+
 
 // Compact Dropzone Component
 interface CompactDropzoneProps {
@@ -164,15 +308,20 @@ export const ReconWorkbench: React.FC = () => {
     const [reconciling, setReconciling] = useState(false);
     const [lastReconResult, setLastReconResult] = useState<ReconciliationStats | null>(null);
     const [resetKey, setResetKey] = useState(0);
-    const [lastBankFile, setLastBankFile] = useState<string | null>(null);
-    const [lastReceiptFile, setLastReceiptFile] = useState<string | null>(null);
     const [filter, setFilter] = useState<'ALL' | 'MATCHED' | 'UNLINKED'>('ALL');
+    const [activeDoc, setActiveDoc] = useState<FinancialDocument | null>(null);
+
+    // Conflict Modal State
+    const [conflictModalOpen, setConflictModalOpen] = useState(false);
+    const [pendingMatch, setPendingMatch] = useState<{ txnId: string, receiptId: string, message: string } | null>(null);
 
     // Fetch Transactions (Bank Feed) - Explicit Type
     const { data: transactions, isLoading: loadingTx, isError: errorTx } = useQuery<Transaction[]>({
         queryKey: ['transactions', 'BANK_STATEMENT'],
         queryFn: () => getTransactions(false, 'BANK_STATEMENT'),
     });
+
+
 
     // Fetch Documents (Receipts) - Explicit Type
     const { data: documents, isLoading: loadingDocs, isError: errorDocs } = useQuery<FinancialDocument[]>({
@@ -204,8 +353,6 @@ export const ReconWorkbench: React.FC = () => {
         mutationFn: resetWorkspace,
         onSuccess: () => {
             setLastReconResult(null);
-            setLastBankFile(null);
-            setLastReceiptFile(null);
             setResetKey(prev => prev + 1);
             queryClient.invalidateQueries({ queryKey: ['documents'] });
             queryClient.invalidateQueries({ queryKey: ['transactions'] });
@@ -217,17 +364,63 @@ export const ReconWorkbench: React.FC = () => {
     const receiptDocuments = documents || [];
 
     // Refresh function for uploads
-    const refreshData = (filename?: string, type?: 'BANK_STATEMENT' | 'RECEIPT') => {
-        if (filename) {
-            if (type === 'BANK_STATEMENT') setLastBankFile(filename);
-            else if (type === 'RECEIPT') setLastReceiptFile(filename);
-        }
+    // Refresh function for uploads
+    const refreshData = () => {
         queryClient.invalidateQueries({ queryKey: ['documents'] });
         queryClient.invalidateQueries({ queryKey: ['transactions'] });
     };
 
+    // Manual Match Logic
+    const handleDragStart = (event: DragStartEvent) => {
+        setActiveDoc(event.active.data.current as FinancialDocument);
+    };
+
+    const handleDragEnd = async (event: DragEndEvent) => {
+        const { active, over } = event;
+        setActiveDoc(null);
+
+        if (!over) return;
+
+        const receiptId = active.id as string;
+        const txnId = over.id as string;
+
+        try {
+            await manualMatch(txnId, receiptId, false);
+            toast.success("Match Confirmed");
+            queryClient.invalidateQueries({ queryKey: ['transactions'] });
+            queryClient.invalidateQueries({ queryKey: ['documents'] });
+        } catch (err: any) {
+            if (err.response?.status === 409) {
+                const msg = err.response.data.detail?.replace("Discrepancy Detected:", "").trim();
+                setPendingMatch({
+                    txnId,
+                    receiptId,
+                    message: msg || "Discrepancy detected."
+                });
+                setConflictModalOpen(true);
+            } else {
+                toast.error("Match Failed", { description: err.message || "Unknown error" });
+            }
+        }
+    };
+
+    const confirmForceMatch = async () => {
+        if (!pendingMatch) return;
+        try {
+            await manualMatch(pendingMatch.txnId, pendingMatch.receiptId, true);
+            toast.success("Forced Match Confirmed");
+            queryClient.invalidateQueries({ queryKey: ['transactions'] });
+            queryClient.invalidateQueries({ queryKey: ['documents'] });
+            setConflictModalOpen(false);
+            setPendingMatch(null);
+        } catch (err: any) {
+            toast.error("Force Match Failed", { description: err.message });
+        }
+    };
+
+
     return (
-        <div className="space-y-6">
+        <div className="space-y-6 relative">
             {/* Header */}
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-6">
                 <div>
@@ -276,200 +469,200 @@ export const ReconWorkbench: React.FC = () => {
                 </div>
             )}
 
-            {/* Split View */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <DndContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+                {/* Split View */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-[calc(100vh-250px)] min-h-[500px]">
 
-                {/* Left Column: Bank Feed */}
-                <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                        <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-2">
-                            <div className="w-2 h-6 bg-blue-500 rounded-full"></div>
-                            Bank Feed
-                            <span className="text-xs font-normal px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-500">
-                                {bankTransactions.length} items
-                            </span>
-                        </h3>
-
-                        <div className="flex items-center gap-2">
-                            <select
-                                value={filter}
-                                onChange={(e) => setFilter(e.target.value as any)}
-                                className="text-sm border-slate-200 dark:border-slate-700 rounded-md bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 py-1 px-2 focus:ring-2 focus:ring-blue-500"
-                            >
-                                <option value="ALL">All Transactions</option>
-                                <option value="MATCHED">Matched Only</option>
-                                <option value="UNLINKED">Unlinked Only</option>
-                            </select>
-                            {lastBankFile && (
-                                <span className="ml-auto text-xs text-slate-400 font-normal hidden sm:inline-block">
-                                    Last: <span className="text-slate-600 dark:text-slate-300 truncate max-w-[100px] inline-block align-bottom" title={lastBankFile}>{lastBankFile}</span>
+                    {/* Left Column: Bank Feed */}
+                    <div className="flex flex-col h-full space-y-4">
+                        <div className="flex items-center justify-between flex-shrink-0">
+                            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-2">
+                                <div className="w-2 h-6 bg-blue-500 rounded-full"></div>
+                                Bank Feed
+                                <span className="text-xs font-normal px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-500">
+                                    {bankTransactions.length} items
                                 </span>
+                            </h3>
+
+                            <div className="flex items-center gap-2">
+                                <select
+                                    value={filter}
+                                    onChange={(e) => setFilter(e.target.value as any)}
+                                    className="text-sm border-slate-200 dark:border-slate-700 rounded-md bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 py-1 px-2 focus:ring-2 focus:ring-blue-500"
+                                >
+                                    <option value="ALL">All Transactions</option>
+                                    <option value="MATCHED">Matched Only</option>
+                                    <option value="UNLINKED">Unlinked Only</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        {/* Zone A: Bank Statement Upload */}
+                        <div className="flex-shrink-0">
+                            <CompactDropzone
+                                key={`bank-${resetKey}`}
+                                label="Upload Bank Statement (PDF, CSV, OFX)"
+                                docType="BANK_STATEMENT"
+                                onUploadSuccess={() => refreshData()}
+                            />
+                        </div>
+
+                        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex-1 flex flex-col">
+                            {loadingTx ? (
+                                <div className="flex justify-center items-center h-full text-slate-400">Loading transactions...</div>
+                            ) : errorTx ? (
+                                <div className="flex justify-center items-center h-full text-red-500">Error loading data.</div>
+                            ) : bankTransactions.length === 0 ? (
+                                <div className="flex justify-center items-center h-full text-slate-400">No transactions found.</div>
+                            ) : (
+                                <div className="overflow-y-auto flex-1">
+                                    <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                                        {bankTransactions
+                                            .filter(tx => {
+                                                if (filter === 'MATCHED') return tx.receipt_id;
+                                                if (filter === 'UNLINKED') return !tx.receipt_id;
+                                                return true;
+                                            })
+                                            .map((tx: Transaction) => {
+                                                const isMatched = !!tx.receipt_id;
+                                                const linkedDoc = isMatched && tx.receipt_id
+                                                    ? documents?.find(d => d.id === tx.receipt_id)
+                                                    : undefined;
+
+                                                return (
+                                                    <DroppableTransaction
+                                                        key={tx.id}
+                                                        transaction={tx}
+                                                        isMatched={isMatched}
+                                                        linkedDoc={linkedDoc}
+                                                    />
+                                                );
+                                            })}
+                                    </ul>
+                                </div>
                             )}
                         </div>
                     </div>
 
-                    {/* Zone A: Bank Statement Upload */}
-                    <CompactDropzone
-                        key={`bank-${resetKey}`}
-                        label="Upload Bank Statement (PDF, CSV, OFX)"
-                        docType="BANK_STATEMENT"
-                        onUploadSuccess={(fname) => refreshData(fname, 'BANK_STATEMENT')}
-                    />
+                    {/* Right Column: Receipts Audit */}
+                    <div className="flex flex-col h-full space-y-4">
+                        <div className="flex items-center justify-between flex-shrink-0">
+                            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-2">
+                                <div className="w-2 h-6 bg-purple-500 rounded-full"></div>
+                                Receipts Audit
+                                <span className="text-xs font-normal px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-500">
+                                    {receiptDocuments.length} files
+                                </span>
+                            </h3>
+                        </div>
 
-                    <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden min-h-[500px]">
-                        {loadingTx ? (
-                            <div className="flex justify-center items-center h-64 text-slate-400">Loading transactions...</div>
-                        ) : errorTx ? (
-                            <div className="flex justify-center items-center h-64 text-red-500">Error loading data.</div>
-                        ) : bankTransactions.length === 0 ? (
-                            <div className="flex justify-center items-center h-64 text-slate-400">No transactions found.</div>
-                        ) : (
-                            <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-                                {bankTransactions
-                                    .filter(tx => {
-                                        if (filter === 'MATCHED') return tx.receipt_id;
-                                        if (filter === 'UNLINKED') return !tx.receipt_id;
-                                        return true;
-                                    })
-                                    .map((tx: Transaction) => {
-                                        const isMatched = !!tx.receipt_id;
-                                        // Find linked receipt filename if exists
-                                        const linkedDoc = isMatched && tx.receipt_id
-                                            ? documents?.find(d => d.id === tx.receipt_id)
-                                            : null;
+                        {/* Zone B: Receipts Upload */}
+                        <div className="flex-shrink-0">
+                            <CompactDropzone
+                                key={`receipts-${resetKey}`}
+                                label="Upload Receipts (PDF, XML, CSV)"
+                                docType="RECEIPT"
+                                onUploadSuccess={() => refreshData()}
+                            />
+                        </div>
 
+                        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex-1 flex flex-col">
+                            {loadingDocs ? (
+                                <div className="flex justify-center items-center h-full text-slate-400">Loading documents...</div>
+                            ) : errorDocs ? (
+                                <div className="flex justify-center items-center h-full text-red-500">Error loading documents.</div>
+                            ) : receiptDocuments.length === 0 ? (
+                                <div className="flex justify-center items-center h-full text-slate-400">No receipts uploaded.</div>
+                            ) : (
+                                <div className="overflow-y-auto flex-1 p-2 space-y-2">
+                                    {receiptDocuments.map((doc: FinancialDocument) => {
+                                        // Strict Linked Logic
+                                        const isLinked = bankTransactions.some(bt => bt.receipt_id === doc.id);
                                         return (
-                                            <li key={tx.id} className={cn(
-                                                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group border-l-4",
-                                                isMatched
-                                                    ? "bg-emerald-50/30 dark:bg-emerald-900/10 border-emerald-500"
-                                                    : "border-transparent bg-white dark:bg-slate-900"
-                                            )}>
-                                                <div className="flex justify-between items-start mb-1">
-                                                    <span className="font-medium text-slate-900 dark:text-slate-100 line-clamp-1" title={tx.merchant_name}>
-                                                        {tx.merchant_name}
-                                                    </span>
-                                                    <span className={cn(
-                                                        "font-mono font-semibold",
-                                                        tx.amount < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
-                                                    )}>
-                                                        {formatCurrency(tx.amount)}
-                                                    </span>
-                                                </div>
-                                                <div className="flex justify-between items-center text-sm text-slate-500 dark:text-slate-400">
-                                                    <span>{formatDate(tx.date)}</span>
-
-                                                    {isMatched ? (
-                                                        <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800">
-                                                            <LinkIcon className="w-3 h-3" />
-                                                            {linkedDoc ? `Linked: ${linkedDoc.original_filename || linkedDoc.filename}` : `Matched (${(tx.match_score! * 100).toFixed(0)}%)`}
-                                                        </div>
-                                                    ) : (
-                                                        <span className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">
-                                                            Unlinked
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </li>
+                                            <DraggableReceipt
+                                                key={doc.id}
+                                                doc={doc}
+                                                isLinked={isLinked}
+                                                onDelete={(id) => deleteMutation.mutate(id)}
+                                            />
                                         );
                                     })}
-                            </ul>
-                        )}
-                    </div>
-                </div>
-
-                {/* Right Column: Receipts Audit */}
-                <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                        <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-2">
-                            <div className="w-2 h-6 bg-purple-500 rounded-full"></div>
-                            Receipts Audit
-                            <span className="text-xs font-normal px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-500">
-                                {receiptDocuments.length} files
-                            </span>
-                            {lastReceiptFile && (
-                                <span className="ml-auto text-xs text-slate-400 font-normal">
-                                    Last: <span className="text-slate-600 dark:text-slate-300 truncate max-w-[150px] inline-block align-bottom">{lastReceiptFile}</span>
-                                </span>
+                                </div>
                             )}
-                        </h3>
+                        </div>
                     </div>
 
-                    {/* Zone B: Receipts Upload */}
-                    <CompactDropzone
-                        key={`receipts-${resetKey}`}
-                        label="Upload Receipts & Invoices (PDF, XML)"
-                        docType="RECEIPT"
-                        onUploadSuccess={(fname) => refreshData(fname, 'RECEIPT')}
-                    />
+                </div>
+                <DragOverlay>
+                    {activeDoc ? (
+                        <div className="p-4 bg-white dark:bg-slate-900 rounded-lg shadow-xl border-2 border-purple-500 opacity-90 w-[400px] cursor-grabbing">
+                            <div className="flex items-start gap-3">
+                                <div className="p-2 bg-purple-50 dark:bg-purple-900/20 rounded-lg text-purple-600 dark:text-purple-400">
+                                    <FileText className="w-5 h-5" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className="font-medium text-slate-900 dark:text-slate-100 truncate pr-2">
+                                        {activeDoc.original_filename || activeDoc.filename}
+                                    </p>
+                                    <div className="mt-1 flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">
+                                        {activeDoc.transactions?.[0] ? (
+                                            <>
+                                                <span>{formatDate(activeDoc.transactions[0].date)}</span>
+                                                <span className="text-slate-300 dark:text-slate-700">•</span>
+                                                <span className="font-mono">{formatCurrency(activeDoc.transactions[0].amount)}</span>
+                                            </>
+                                        ) : (
+                                            <span className="italic opacity-70">No specific data</span>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    ) : null}
+                </DragOverlay>
+            </DndContext>
 
-                    <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden min-h-[500px]">
-                        {loadingDocs ? (
-                            <div className="flex justify-center items-center h-64 text-slate-400">Loading documents...</div>
-                        ) : errorDocs ? (
-                            <div className="flex justify-center items-center h-64 text-red-500">Error loading documents.</div>
-                        ) : receiptDocuments.length === 0 ? (
-                            <div className="flex justify-center items-center h-64 text-slate-400">No receipts uploaded.</div>
-                        ) : (
-                            <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-                                {receiptDocuments.map((doc: FinancialDocument) => {
-                                    // Ensure strict typing for nested properties
-                                    const isLinked = doc.transactions && doc.transactions.length > 0;
-                                    const receiptTx = doc.transactions?.[0];
+            {/* Conflict Resolution Modal */}
+            {conflictModalOpen && pendingMatch && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+                    <div className="bg-white dark:bg-slate-950 rounded-lg shadow-xl max-w-md w-full overflow-hidden border border-slate-200 dark:border-slate-800 animate-in zoom-in-95 duration-200">
+                        <div className="p-6">
+                            <div className="flex items-center gap-3 mb-4">
+                                <div className="p-2 bg-yellow-100 dark:bg-yellow-900/30 rounded-full text-yellow-600 dark:text-yellow-500">
+                                    <AlertTriangle className="w-6 h-6" />
+                                </div>
+                                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">
+                                    Discrepancy Detected
+                                </h3>
+                            </div>
 
-                                    return (
-                                        <li key={doc.id} className="p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group">
-                                            <div className="flex items-start gap-3">
-                                                <div className="p-2 bg-purple-50 dark:bg-purple-900/20 rounded-lg text-purple-600 dark:text-purple-400">
-                                                    <FileText className="w-5 h-5" />
-                                                </div>
-                                                <div className="flex-1 min-w-0">
-                                                    <div className="flex justify-between items-start">
-                                                        <p className="font-medium text-slate-900 dark:text-slate-100 truncate pr-2" title={doc.original_filename || doc.filename}>
-                                                            {doc.original_filename || doc.filename}
-                                                        </p>
-                                                        <div className="flex items-center gap-2">
-                                                            {isLinked && (
-                                                                <span className="flex-shrink-0 inline-flex items-center rounded-md bg-purple-50 px-2 py-1 text-xs font-medium text-purple-700 ring-1 ring-inset ring-purple-700/10 dark:bg-purple-400/10 dark:text-purple-400 dark:ring-purple-400/30">
-                                                                    Linked
-                                                                </span>
-                                                            )}
-                                                            <button
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    if (confirm('Delete this document?')) deleteMutation.mutate(doc.id);
-                                                                }}
-                                                                className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-slate-400 hover:text-red-500 rounded"
-                                                                title="Delete"
-                                                            >
-                                                                <Trash2 className="w-4 h-4" />
-                                                            </button>
-                                                        </div>
-                                                    </div>
+                            <p className="text-slate-600 dark:text-slate-300 mb-6">
+                                {pendingMatch.message}
+                                <br /><br />
+                                <span className="font-medium">Do you want to force this match?</span>
+                            </p>
 
-                                                    <div className="mt-1 flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">
-                                                        {receiptTx ? (
-                                                            <>
-                                                                <span>{formatDate(receiptTx.date)}</span>
-                                                                <span className="text-slate-300 dark:text-slate-700">•</span>
-                                                                <span className="font-mono">{formatCurrency(receiptTx.amount)}</span>
-                                                            </>
-                                                        ) : (
-                                                            <span className="italic opacity-70">No specific data extracted</span>
-                                                        )}
-                                                    </div>
-
-                                                </div>
-                                            </div>
-                                        </li>
-                                    );
-                                })}
-                            </ul>
-                        )}
+                            <div className="flex justify-end gap-3">
+                                <button
+                                    onClick={() => {
+                                        setConflictModalOpen(false);
+                                        setPendingMatch(null);
+                                    }}
+                                    className="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={confirmForceMatch}
+                                    className="px-4 py-2 text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 rounded-lg"
+                                >
+                                    Force Match
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
-
-            </div>
+            )}
         </div>
     );
 };

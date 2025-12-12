@@ -33,64 +33,74 @@ class ReconciliationEngine:
             doc_id = receipt_txn.document_id
             
             # Filter matches
+            # Filter matches
             candidates = []
             for bank_txn in bank_transactions:
                 if bank_txn.id in matched_bank_ids:
                     continue
                 
+                # 1. Value Match (Primary Filter)
                 # Check Amount Tolerance (0.05)
-                # Note: Transaction.amount is Decimal. receipt_txn.amount is Decimal.
-                diff = abs(float(bank_txn.amount) - float(receipt_txn.amount))
+                try:
+                    b_amt = float(bank_txn.amount)
+                    r_amt = float(receipt_txn.amount)
+                except:
+                    continue
+                    
+                diff = abs(b_amt - r_amt)
                 if diff > 0.05:
                     continue
                 
-                # Check Date Tolerance (+/- 3 days)
-                # Transaction.date is datetime.date usually (from model 'Date')
-                date_diff = abs((bank_txn.date - receipt_txn.date).days)
-                if date_diff > 3:
+                # 2. Date Window Filter (+/- 3 days)
+                # Calculate Date Penalty
+                date_penalty = abs((bank_txn.date - receipt_txn.date).days)
+                if date_penalty > 3:
                     continue
                 
-                # Calculate Score
-                score = 0.8 # Base for Date+Amount
-                
-                # Merchant Fuzzy Match
-                # e.g. "UBER * TRIP" vs "Uber"
+                # 3. Name Similarity (Secondary Signal)
                 name_score = fuzz.partial_ratio(receipt_txn.merchant_name.lower(), bank_txn.merchant_name.lower())
-                if name_score > 80:
-                    score += 0.2
                 
-                candidates.append((score, bank_txn))
+                candidates.append({
+                    "txn": bank_txn,
+                    "date_penalty": date_penalty,
+                    "name_score": name_score
+                })
             
-            # Decision
+            # Decision Logic
             if not candidates:
                 continue
             
-            # Sort by score desc
-            candidates.sort(key=lambda x: x[0], reverse=True)
+            # Weighted Scoring / Priority
+            # Priority 1: Smallest Date Penalty (date_penalty ASC)
+            # Priority 2: Highest Name Score (name_score DESC)
+            candidates.sort(key=lambda x: (x["date_penalty"], -x["name_score"]))
             
-            best_score, best_match = candidates[0]
+            best = candidates[0]
             
-            # Thresholds
-            # If strictly one > 0.8? Or just best > 0.8?
-            # Instructions: 
-            # "If exactly one candidate > 0.8 -> Link"
-            # "If multiple -> Take highest if > 0.9"
+            # Determine Final Score for record
+            # Base logic: Exact Date + Value = Very High Confidence
+            # Formula: 1.0 matching value (implicit)
+            # Penalty: -0.1 per day difference
+            # Bonus: +0.1 if name matches well (>80)
             
-            final_match = None
+            final_score = 0.9 - (best["date_penalty"] * 0.1)
+            if best["name_score"] > 80:
+                final_score += 0.1
+                
+            # Clamp to 1.0
+            final_score = min(final_score, 1.0)
             
-            high_scores = [c for c in candidates if c[0] > 0.8]
+            # Threshold for Auto-Link
+            # If date is exact (penalty 0), score is >= 0.9 -> Match
+            # If date is off by 1 day (penalty 1), score is 0.8 -> Match
+            # If date is off by 3 days (penalty 3), score is 0.6 -> Maybe not auto match unless name is good? -> 0.7
             
-            if len(high_scores) == 1:
-                final_match = high_scores[0][1]
-            elif len(high_scores) > 1:
-                # Multiple candidates, check if best is > 0.9
-                if best_score > 0.9:
-                    final_match = best_match
-            
-            if final_match:
+            if final_score >= 0.75:
+                final_match = best["txn"]
+                
                 # Apply Link
                 final_match.receipt_id = doc_id
-                final_match.match_score = best_score
+                final_match.match_score = final_score
                 final_match.match_type = "AUTO"
                 
                 session.add(final_match)
@@ -99,11 +109,11 @@ class ReconciliationEngine:
                 results["details"].append({
                     "bank_txn_id": str(final_match.id),
                     "receipt_doc_id": str(doc_id),
-                    "score": best_score
+                    "score": final_score
                 })
         
-        if bank_transactions:
-            accuracy = results["matches_found"] / len(bank_transactions)
+        if receipt_transactions:
+            accuracy = results["matches_found"] / len(receipt_transactions)
         else:
             accuracy = 0.0
 

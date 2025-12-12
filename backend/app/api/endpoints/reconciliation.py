@@ -12,6 +12,8 @@ from typing import List
 from app.db.session import get_db
 from app.db.models import FinancialDocument, Transaction
 from app.schemas.document import FinancialDocumentResponse, TransactionResponse
+from app.schemas.match import ManualMatchRequest
+from datetime import date
 
 router = APIRouter()
 
@@ -194,6 +196,90 @@ async def delete_document(document_id: uuid.UUID, db: AsyncSession = Depends(get
     await db.delete(doc)
     await db.commit()
     return None
+
+
+
+
+
+@router.post("/transactions/{transaction_id}/match", status_code=status.HTTP_200_OK)
+async def manual_match_transaction(
+    transaction_id: uuid.UUID,
+    match_request: ManualMatchRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Manually link a Bank Transaction to a Receipt.
+    Checks for discrepancies unless force=True.
+    """
+    # 1. Fetch Transaction
+    txn = await db.get(Transaction, transaction_id)
+    if not txn:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    # 2. Fetch Receipt (with Transactions)
+    stmt = select(FinancialDocument).options(selectinload(FinancialDocument.transactions)).where(FinancialDocument.id == match_request.receipt_id)
+    receipt_res = await db.execute(stmt)
+    receipt = receipt_res.scalar_one_or_none()
+
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Receipt document not found")
+        
+    if receipt.doc_type != "RECEIPT":
+         raise HTTPException(status_code=400, detail="Document provided is not a Receipt")
+
+    # 2.5 Unlink older owner if exists (Steal Logic)
+    stmt = select(Transaction).where(Transaction.receipt_id == receipt.id)
+    existing_links = (await db.execute(stmt)).scalars().all()
+    
+    for old_txn in existing_links:
+        if old_txn.id != txn.id:
+            old_txn.receipt_id = None
+            old_txn.match_score = None
+            old_txn.match_type = None
+
+    # 3. Validation Logic (if not forced)
+    if not match_request.force:
+        warnings = []
+        
+        r_amount = None
+        r_date = None
+        
+        # Use first transaction from receipt if available
+        if receipt.transactions:
+             r_amount = receipt.transactions[0].amount
+             r_date = receipt.transactions[0].date
+        
+        # If Receipt Amount is known
+        if r_amount is not None:
+             diff = abs(float(txn.amount) - float(r_amount))
+             if diff > 0.05:
+                 warnings.append(f"Amount mismatch: Transaction R${txn.amount} vs Receipt R${r_amount}")
+        
+        # If Receipt Date is known
+        if r_date is not None:
+            # r_date (from DB) is typically a date object
+            try:
+                if txn.date != r_date:
+                     txn_str = txn.date.strftime("%d/%m")
+                     rec_str = r_date.strftime("%d/%m")
+                     warnings.append(f"Date Mismatch: Receipt is {rec_str} but Transaction is {txn_str}. Confirm match?")
+            except:
+                pass # Date parsing failed, ignore warning
+                
+        if warnings:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Discrepancy Detected: " + ", ".join(warnings)
+            )
+
+    # 4. Apply Match
+    txn.receipt_id = receipt.id
+    txn.match_score = 1.0
+    txn.match_type = "MANUAL"
+    
+    await db.commit()
+    
+    return {"message": "Match confirmed"}
 
 @router.delete("/reset", status_code=status.HTTP_200_OK)
 async def reset_workspace(db: AsyncSession = Depends(get_db)):
