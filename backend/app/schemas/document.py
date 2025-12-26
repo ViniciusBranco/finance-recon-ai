@@ -21,6 +21,8 @@ class ProcessingState(TypedDict):
 
 # --- DB Response Schemas ---
 
+from app.schemas.tax import TaxAnalysisResponse
+
 class TransactionResponse(BaseModel):
     id: uuid.UUID
     document_id: uuid.UUID
@@ -31,6 +33,7 @@ class TransactionResponse(BaseModel):
     receipt_id: Optional[uuid.UUID] = None
     match_score: Optional[float] = None
     match_type: Optional[str] = None
+    tax_analysis: Optional[TaxAnalysisResponse] = None
 
     class Config:
         from_attributes = True

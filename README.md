@@ -1,74 +1,51 @@
 # Finance Recon AI 💰🤖
 
-> **Automação de Conciliação Financeira com Inteligência Artificial e Auditoria Ativa.**
+> **Automação de Conciliação Financeira com Inteligência Artificial e Auditoria Fiscal.**
 
-O **Finance Recon AI** é uma solução de engenharia de dados financeiros projetada para eliminar o trabalho manual de bater extratos bancários com notas fiscais. O sistema emprega uma estratégia híbrida de ingestão (Pandas para estruturados, LLM para não-estruturados) e oferece uma interface de auditoria ativa com travas de segurança rigorosas.
+O **Finance Recon AI** é uma solução de engenharia de dados financeiros projetada para eliminar o trabalho manual de bater extratos bancários com notas fiscais e automatizar a conformidade contábil. O sistema emprega uma estratégia híbrida de ingestão, reconciliação N:1 para parcelamentos e um motor de RAG especializado em regras da Receita Federal.
 
-![Status](https://img.shields.io/badge/Status-v1.3%20Audit%20Ready-success)
-![Stack](https://img.shields.io/badge/AI%20Core-LangGraph%20%2B%20Ollama-violet)
-![Stack](https://img.shields.io/badge/Performance-Pandas%20Fast%20Track-orange)
+![Status](https://img.shields.io/badge/Status-v1.4--beta%20Tax%20Engine-blue)
+![Stack](https://img.shields.io/badge/AI%20Core-LangGraph%20%2B%20FAISS-violet)
+![Stack](https://img.shields.io/badge/LLM-Ollama%20%2F%20OpenAI%20Factory-orange)
 
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=fff)](#)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=fff)](#)
-[![React](https://img.shields.io/badge/React-Vite-61DAFB?logo=react&logoColor=000)](#)
-[![Tailwind](https://img.shields.io/badge/Tailwind-v4-38B2AC?logo=tailwind-css&logoColor=white)](#)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-336791?logo=postgresql&logoColor=fff)](#)
 
-## ✨ Funcionalidades Core (v1.3)
+## ✨ Funcionalidades Core (v1.4)
 
-* ⚡ **Ingestão Híbrida Inteligente:** Pipeline adaptativo que usa `Pandas` para leitura instantânea de CSVs (bypass de GPU) e Agentes LLM apenas para PDFs/Imagens complexos.
-* 🖱️ **Auditoria Visual (Drag-and-Drop):** Interface de arrastar e soltar com scroll independente para conciliação manual ágil.
-* 🛡️ **Travas de Segurança (Strict Matching):** Validação rígida de Data e Valor no match manual. Discrepâncias de D+0 ou centavos acionam alertas de confirmação (`HTTP 409`).
-* 📊 **KPI Orientado à Auditoria:** Cálculo de acurácia focado na **Cobertura de Notas Fiscais** (Audit Completeness), ignorando o ruído natural do extrato bancário.
-* 🔐 **Suporte a Arquivos Protegidos:** Detecção e tratamento de PDFs criptografados com interação via UI.
+* 🧠 **TaxExpertAgent (RAG Local):** Agente especializado em IRPF/Livro-Caixa para profissionais de saúde. Utiliza vetores FAISS baseados na IN 1500/2014 e Perguntão IRPF 2025.
+* 🔄 **Reconciliação N:1 (Parcelamento):** Algoritmo capaz de identificar e vincular múltiplas transações bancárias (parcelas) a uma única Nota Fiscal de alto valor.
+* 🏗️ **LLM Factory Pattern:** Suporte modular para alternar entre inferência local (Ollama/Qwen) e Cloud (OpenAI GPT-4o) via variáveis de ambiente.
+* 🛡️ **Time-Aware Audit:** Injeção dinâmica de data atual para validação rigorosa de "Regime de Caixa" e detecção de lançamentos futuros.
+* ⚡ **Ingestão Híbrida:** Pipeline adaptativo (Pandas + LLM Vision) para processar PDFs protegidos, imagens e CSVs instantaneamente.
 
-## 🚀 Engineering Highlights (Sprint v1.3)
+## 🚀 Engineering Highlights (Último Sprint)
 
-O sistema evoluiu de uma ferramenta de "match passivo" para uma plataforma de auditoria robusta:
+1.  **Resiliência de Output (JSON Hardening):**
+    Implementação de limpeza via Regex e *Few-Shot Prompting* para combater o desvio de formato (Markdown) em modelos 7B, garantindo a integridade do `PydanticOutputParser`.
+    
+2.  **Motor de Reconciliação Fracionário:**
+    Adoção de lógica transação-cêntrica com tolerância de centavos (R$ 1,00) para lidar com arredondamentos bancários em boletos parcelados.
 
-1.  **CSV Fast-Track (IOPS Optimization):**
-    Implementação de rota expressa para arquivos `.csv`. O parser detecta delimitadores e encodings automaticamente, processando milhares de linhas em milissegundos sem onerar a VRAM/LLM.
-
-2.  **Safety Net Logic (Zero Tolerance):**
-    Refatoração do algoritmo de *Manual Match*. O sistema agora aplica tolerância zero para diferenças de data ou valor, exigindo *override* explícito do usuário (Modal de Confirmação) para garantir integridade contábil.
-
-3.  **UX Reativa & DndKit:**
-    Migração para `@dnd-kit` com zonas de drop visuais e feedback tátil. Scrollbars independentes nas colunas permitem auditar listas de tamanhos desproporcionais (ex: 80 transações vs 5 notas).
+3.  **Persistência Unicode:**
+    Padronização de encoding `utf-8-sig` para garantir a integridade de acentuação em extratos de bancos tradicionais (Itaú/Bradesco).
 
 ## 🏗️ Arquitetura
 
-O projeto segue uma arquitetura baseada em microsserviços containerizados:
-
 | Serviço | Tech Stack | Responsabilidade |
 | :--- | :--- | :--- |
-| **API Server** | FastAPI / Pydantic | Orquestração, Validação de Regras de Negócio e Endpoints REST. |
-| **Worker AI** | LangChain / LangGraph | Agentes para extração de dados não-estruturados (PDF/Img). |
-| **Data Engine** | Pandas / NumPy | Processamento vetorial de alta performance para CSV/OFX. |
-| **Frontend** | React / TanStack Query | SPA com *Optimistic UI Updates* e gestão de estado complexa. |
-| **Database** | PostgreSQL 15 | Persistência relacional e integridade referencial. |
+| **API Server** | FastAPI / SQLAlchemy | Orquestração, Validação Fiscal e Endpoints REST. |
+| **Tax Engine** | LangChain / FAISS | RAG para análise de dedutibilidade e citações legais. |
+| **LLM Factory** | Ollama / OpenAI | Abstração de modelos de linguagem (Local/Cloud). |
+| **Database** | PostgreSQL 15 | Persistência de documentos, transações e histórico fiscal. |
 
-## 🛠️ Como Rodar (Local)
+## 📅 Backlog (Próximos Passos)
 
-### Pré-requisitos
-* Docker & Docker Compose v2+
-* Python 3.11+ (Recomendado para tooling local)
-
-### Instalação
-
-1.  **Clone e Configure:**
-    ```bash
-    git clone [https://github.com/ViniciusBranco/finance-recon-ai.git](https://github.com/ViniciusBranco/finance-recon-ai.git)
-    cd finance-recon-ai
-    cp .env.example .env
-    ```
-
-2.  **Suba a Stack:**
-    ```bash
-    docker compose up -d --build
-    ```
-
-3.  **Acesse:**
-    * **Frontend:** `http://localhost:5173`
-    * **API Docs:** `http://localhost:8000/docs`
+- [ ] **Stability Fix:** Resolver definitivamente o `OUTPUT_PARSING_FAILURE` em cenários de contexto inflado (NFs densas).
+- [ ] **Persistence Layer:** Implementar armazenamento em `JSONB` das análises de dedutibilidade para auditoria histórica.
+- [ ] **Livro-Caixa Generator:** Geração de relatório consolidado pronto para importação no Carnê-Leão Web.
+- [ ] **Tax UI:** Interface para exibição de citações legais e indicadores de "Risco de Glosa" no card de transação.
 
 ---
 *Desenvolvido com foco em Clean Code, Performance e Rigor Contábil.*

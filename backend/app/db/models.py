@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional
-from sqlalchemy import String, Numeric, DateTime, ForeignKey, Text, Date, Float
+from sqlalchemy import String, Numeric, DateTime, ForeignKey, Text, Date, Float, Boolean
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 
@@ -44,3 +44,28 @@ class Transaction(Base):
 
     document: Mapped["FinancialDocument"] = relationship(foreign_keys=[document_id], back_populates="transactions")
     receipt: Mapped[Optional["FinancialDocument"]] = relationship(foreign_keys=[receipt_id])
+    
+    tax_analysis: Mapped[Optional["TaxAnalysis"]] = relationship(
+        back_populates="transaction",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+
+class TaxAnalysis(Base):
+    __tablename__ = "tax_analysis"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    transaction_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("transactions.id"), unique=True, nullable=False)
+    
+    classification: Mapped[str] = mapped_column(String, nullable=False) # Dedutível, Não Dedutível, Parcialmente Dedutível
+    category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    month: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    justification_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    legal_citation: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    
+    # Audit fields
+    is_manual_override: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    transaction: Mapped["Transaction"] = relationship(back_populates="tax_analysis")

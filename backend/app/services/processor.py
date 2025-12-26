@@ -58,36 +58,27 @@ def parse_csv(state: ProcessingState) -> ProcessingState:
         file_path = state["file_path"]
         df = None
         
-        # 1. Detect Encoding & Separator
-        encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']
-        separators = [',', ';', '\t']
-        
-        for enc in encodings:
-            try:
-                # Try sniffing with python engine
-                temp_df = pd.read_csv(file_path, sep=None, engine='python', encoding=enc, nrows=5)
-                # If we have at least 1 column, it's a good start
-                if len(temp_df.columns) > 0:
-                    # Re-read full file
-                    df = pd.read_csv(file_path, sep=None, engine='python', encoding=enc)
-                    break
-            except Exception:
-                continue
-                
         if df is None:
-             # Fallback: specific common formatted tries
-             for enc in encodings:
-                 for sep in separators:
-                     try:
-                        df = pd.read_csv(file_path, sep=sep, encoding=enc)
-                        if len(df.columns) > 1: # Heuristic
-                            break
-                     except:
-                        continue
-                 if df is not None: break
+             # Force UTF-8-SIG as per instructions, try common separators
+             # "ensure that all string extractions and CSV/PDF reads force utf-8"
+             separators = [',', ';', '\t']
+             for sep in separators:
+                 try:
+                    df = pd.read_csv(file_path, sep=sep, encoding='utf-8-sig') # Forced encoding
+                    if len(df.columns) > 1:
+                        break
+                 except Exception:
+                    continue
         
         if df is None:
-            return {**state, "error": "CSV Parsing failed: Could not determine encoding/separator."}
+             # Last ditch: try python engine with delimiter sniffing but forced encoding
+             try:
+                df = pd.read_csv(file_path, sep=None, engine='python', encoding='utf-8-sig')
+             except:
+                pass
+
+        if df is None:
+            return {**state, "error": "CSV Parsing failed: Could not read with UTF-8-SIG encoding."}
             
         # 2. Normalize Columns
         # Remove BOM artifacts explicitly if encoding didn't catch it

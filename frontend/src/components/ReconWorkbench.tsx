@@ -8,10 +8,12 @@ import {
     deleteDocument,
     resetWorkspace,
     uploadDocument,
-    manualMatch
+    manualMatch,
+    analyzeTax
 } from '../lib/api';
 import type { Transaction, FinancialDocument, ReconciliationStats } from '../lib/api';
-import { RefreshCw, CheckCircle, FileText, Link as LinkIcon, Trash2, Upload, Loader2, AlertCircle, AlertTriangle } from 'lucide-react';
+import { RefreshCw, CheckCircle, FileText, Link as LinkIcon, Trash2, Upload, Loader2, AlertCircle, AlertTriangle, Scale } from 'lucide-react';
+import { TaxAnalysisPanel } from './TaxAnalysisPanel';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { toast } from 'sonner';
@@ -123,43 +125,80 @@ const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction
         id: tx.id,
         disabled: isMatched
     });
+    const [showTax, setShowTax] = useState(false);
+
+    // Classification Colors
+    const getTaxStatusColor = () => {
+        if (!tx.tax_analysis) return "text-slate-400 bg-slate-100 dark:bg-slate-800 dark:text-slate-500 hover:text-blue-600 hover:bg-blue-50";
+        const cls = tx.tax_analysis.classification.toLowerCase();
+        if (cls.includes('dedutível') && !cls.includes('não')) return "text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 dark:text-emerald-400";
+        if (cls.includes('parcial')) return "text-yellow-600 bg-yellow-50 dark:bg-yellow-900/20 dark:text-yellow-400";
+        return "text-slate-500 bg-slate-100 dark:bg-slate-800 dark:text-slate-400";
+    };
 
     return (
         <li
             ref={setNodeRef}
             className={cn(
-                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group border-l-4",
+                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group border-l-4 flex flex-col gap-3",
                 isMatched
                     ? "bg-emerald-50/30 dark:bg-emerald-900/10 border-emerald-500"
                     : "border-transparent bg-white dark:bg-slate-900",
                 isOver && !isMatched && "bg-blue-50 dark:bg-blue-900/20 border-blue-500 ring-1 ring-inset ring-blue-500/20"
             )}
         >
-            <div className="flex justify-between items-start mb-1">
-                <span className="font-medium text-slate-900 dark:text-slate-100 line-clamp-1" title={tx.merchant_name}>
-                    {tx.merchant_name}
-                </span>
-                <span className={cn(
-                    "font-mono font-semibold",
-                    tx.amount < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
-                )}>
-                    {formatCurrency(tx.amount)}
-                </span>
-            </div>
-            <div className="flex justify-between items-center text-sm text-slate-500 dark:text-slate-400">
-                <span>{formatDate(tx.date)}</span>
-
-                {isMatched ? (
-                    <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800">
-                        <LinkIcon className="w-3 h-3" />
-                        {linkedDoc ? `Linked: ${linkedDoc.original_filename || linkedDoc.filename}` : `Matched (${(tx.match_score! * 100).toFixed(0)}%)`}
+            <div className="flex justify-between items-start">
+                <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-start mb-1">
+                        <span className="font-medium text-slate-900 dark:text-slate-100 line-clamp-1" title={tx.merchant_name}>
+                            {tx.merchant_name}
+                        </span>
+                        <span className={cn(
+                            "font-mono font-semibold ml-2",
+                            tx.amount < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
+                        )}>
+                            {formatCurrency(tx.amount)}
+                        </span>
                     </div>
-                ) : (
-                    <span className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">
-                        Unlinked
-                    </span>
-                )}
+                    <div className="flex justify-between items-center text-sm text-slate-500 dark:text-slate-400">
+                        <span>{formatDate(tx.date)}</span>
+
+                        <div className="flex items-center gap-2">
+                            {isMatched && (
+                                <button
+                                    onClick={() => setShowTax(!showTax)}
+                                    className={cn("p-1.5 rounded-md transition-colors flex items-center gap-1.5 text-xs font-medium border border-transparent", getTaxStatusColor(), showTax && "ring-2 ring-blue-500/20")}
+                                    title="Tax Analysis"
+                                >
+                                    <Scale className="w-3.5 h-3.5" />
+                                    {tx.tax_analysis?.classification || "Analyze"}
+                                </button>
+                            )}
+
+                            {isMatched ? (
+                                <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800">
+                                    <LinkIcon className="w-3 h-3" />
+                                    {linkedDoc ? `Linked: ${linkedDoc.original_filename || linkedDoc.filename}` : `Matched (${(tx.match_score! * 100).toFixed(0)}%)`}
+                                </div>
+                            ) : (
+                                <span className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">
+                                    Unlinked
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                </div>
             </div>
+
+            {showTax && isMatched && (
+                <div className="pt-2 animate-in slide-in-from-top-2 duration-200">
+                    <TaxAnalysisPanel
+                        transactionId={tx.id}
+                        analysis={tx.tax_analysis}
+                        onClose={() => setShowTax(false)}
+                    />
+                </div>
+            )}
         </li>
     );
 };
@@ -231,7 +270,7 @@ const CompactDropzone: React.FC<CompactDropzoneProps> = ({ label, docType, onUpl
                                 await processFile(file, password);
                                 continue; // Success on retry
                             } catch (retryErr: any) {
-                                const retryMsg = retryErr.response?.data?.detail || retryErr.message;
+                                const retryMsg = retryErr.code === 'ECONNABORTED' ? "Upload timed out" : (retryErr.response?.data?.detail || retryErr.message);
                                 toast.error("Retry Failed", { description: retryMsg });
                                 setError(retryMsg); // Make sure to set error if retry fails
                             }
@@ -242,6 +281,10 @@ const CompactDropzone: React.FC<CompactDropzoneProps> = ({ label, docType, onUpl
                     } else if (err.response?.status === 409) {
                         toast.error("Duplicate File", { description: msg });
                         setError(msg);
+                    } else if (err.code === 'ECONNABORTED') {
+                        const timeoutMsg = "Upload timed out. The file might be too large or the server is busy.";
+                        toast.error("Upload Failed", { description: timeoutMsg });
+                        setError(timeoutMsg);
                     } else {
                         toast.error("Upload Failed", { description: msg });
                         setError(msg);
@@ -253,7 +296,8 @@ const CompactDropzone: React.FC<CompactDropzoneProps> = ({ label, docType, onUpl
             console.error("Critical upload error", globalErr);
         } finally {
             setUploading(false);
-            if (!error) setCurrentFile(null);
+            // If we had a successful upload logic that cleared error, we keep it cleared. 
+            // If we had an error, it is set above.
         }
     }, [onUploadSuccess, docType, error]);
 
@@ -387,6 +431,12 @@ export const ReconWorkbench: React.FC = () => {
         try {
             await manualMatch(txnId, receiptId, false);
             toast.success("Match Confirmed");
+            // Trigger Tax Analysis in background
+            analyzeTax(txnId).then(() => {
+                toast.success("Tax Analysis Complete");
+                queryClient.invalidateQueries({ queryKey: ['transactions'] });
+            }).catch(e => console.error("Tax Analysis Trigger Failed", e));
+
             queryClient.invalidateQueries({ queryKey: ['transactions'] });
             queryClient.invalidateQueries({ queryKey: ['documents'] });
         } catch (err: any) {
@@ -409,6 +459,13 @@ export const ReconWorkbench: React.FC = () => {
         try {
             await manualMatch(pendingMatch.txnId, pendingMatch.receiptId, true);
             toast.success("Forced Match Confirmed");
+
+            // Trigger Tax Analysis in background
+            analyzeTax(pendingMatch.txnId).then(() => {
+                toast.success("Tax Analysis Complete");
+                queryClient.invalidateQueries({ queryKey: ['transactions'] });
+            }).catch(e => console.error("Tax Analysis Trigger Failed", e));
+
             queryClient.invalidateQueries({ queryKey: ['transactions'] });
             queryClient.invalidateQueries({ queryKey: ['documents'] });
             setConflictModalOpen(false);

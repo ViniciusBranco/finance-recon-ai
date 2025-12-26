@@ -2,6 +2,17 @@ import axios from 'axios';
 
 // --- Interfaces based on Backend Models ---
 
+export interface TaxAnalysis {
+    id: string;
+    transaction_id: string;
+    classification: string;
+    category: string | null;
+    month: string | null;
+    justification_text: string | null;
+    legal_citation: string | null;
+    is_manual_override: boolean;
+}
+
 export interface Transaction {
     id: string; // UUID
     document_id: string; // UUID
@@ -12,6 +23,7 @@ export interface Transaction {
     receipt_id: string | null; // UUID
     match_score: number | null;
     match_type: string | null; // 'AUTO' | 'MANUAL' | null
+    tax_analysis?: TaxAnalysis | null;
 }
 
 export interface FinancialDocument {
@@ -64,10 +76,15 @@ export const uploadDocument = async (file: File, docType?: 'BANK_STATEMENT' | 'R
         formData.append('expected_type', docType);
     }
 
+    // Dynamic timeout based on file size
+    // Minimum 300 seconds (300000ms = 5 minutes) to allow for slow local LLM inference
+    const timeout = Math.max(300000, file.size / 20);
+
     const response = await apiClient.post<UploadResponse>('/recon/upload', formData, {
         headers: {
             'Content-Type': 'multipart/form-data',
         },
+        timeout: timeout
     });
     return response.data;
 };
@@ -101,4 +118,19 @@ export const triggerReconciliation = async (): Promise<ReconciliationStats> => {
 
 export const manualMatch = async (transactionId: string, receiptId: string, force: boolean = false): Promise<void> => {
     await apiClient.post(`/recon/transactions/${transactionId}/match`, { receipt_id: receiptId, force });
+};
+
+export const analyzeTax = async (transactionId: string): Promise<TaxAnalysis> => {
+    const response = await apiClient.post<TaxAnalysis>(`/tax-analysis/${transactionId}`);
+    return response.data;
+};
+
+export const updateTaxAnalysis = async (transactionId: string, data: {
+    classification: string;
+    category: string;
+    justification_text?: string;
+    legal_citation?: string;
+}): Promise<TaxAnalysis> => {
+    const response = await apiClient.put<TaxAnalysis>(`/tax-analysis/${transactionId}`, data);
+    return response.data;
 };

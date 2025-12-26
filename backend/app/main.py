@@ -1,7 +1,7 @@
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 from app.core.config import settings
-from app.api.endpoints import reconciliation
+from app.api.endpoints import reconciliation, tax_analysis
 
 
 
@@ -18,6 +18,7 @@ app.add_middleware(
 
 # Register Routers
 app.include_router(reconciliation.router, prefix="/api/v1/recon", tags=["Reconciliation"])
+app.include_router(tax_analysis.router, prefix="/api/v1", tags=["Tax Analysis"])
 
 @app.get("/")
 async def root():

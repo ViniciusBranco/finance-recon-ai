@@ -133,7 +133,9 @@ async def get_documents(
     Fetch all financial documents with their transactions.
     Optional: Filter by doc_type (e.g., 'RECEIPT', 'BANK_STATEMENT').
     """
-    stmt = select(FinancialDocument).options(selectinload(FinancialDocument.transactions))
+    stmt = select(FinancialDocument).options(
+        selectinload(FinancialDocument.transactions).selectinload(Transaction.tax_analysis)
+    )
     
     if doc_type:
         stmt = stmt.where(FinancialDocument.doc_type == doc_type)
@@ -153,7 +155,11 @@ async def get_transactions(
     If unlinked_only=True, returns only transactions not yet matched to a receipt.
     If doc_type is provided, filters transactions by their parent document's type.
     """
-    stmt = select(Transaction).join(FinancialDocument, Transaction.document_id == FinancialDocument.id)
+    stmt = (
+        select(Transaction)
+        .join(FinancialDocument, Transaction.document_id == FinancialDocument.id)
+        .options(selectinload(Transaction.tax_analysis))
+    )
     
     if unlinked_only:
         stmt = stmt.where(Transaction.receipt_id.is_(None))
@@ -251,9 +257,9 @@ async def manual_match_transaction(
         
         # If Receipt Amount is known
         if r_amount is not None:
-             diff = abs(float(txn.amount) - float(r_amount))
+             diff = abs(abs(float(txn.amount)) - abs(float(r_amount)))
              if diff > 0.05:
-                 warnings.append(f"Amount mismatch: Transaction R${txn.amount} vs Receipt R${r_amount}")
+                 warnings.append(f"Diferença de valor detectada: R$ {abs(float(txn.amount))} vs R$ {abs(float(r_amount))}")
         
         # If Receipt Date is known
         if r_date is not None:

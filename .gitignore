@@ -53,3 +53,4 @@ docker-data/
 # Personal
 samples/
 scratchpad/
+*.pdf
