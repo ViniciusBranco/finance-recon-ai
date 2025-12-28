@@ -24,6 +24,12 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-finance_recon}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - LLM_PROVIDER=${LLM_PROVIDER:-OLLAMA}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-2.5-flash}
+      - OPENAI_MODEL_NAME=${OPENAI_MODEL_NAME:-gpt-5.2}
+      - USD_BRL_RATE=${USD_BRL_RATE:-5.85}
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
     depends_on:

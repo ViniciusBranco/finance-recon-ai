@@ -2,9 +2,9 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional
-from sqlalchemy import String, Numeric, DateTime, ForeignKey, Text, Date, Float, Boolean
+from sqlalchemy import String, Numeric, DateTime, ForeignKey, Text, Date, Float, Boolean, Integer
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 
 class Base(DeclarativeBase):
     pass
@@ -51,6 +51,8 @@ class Transaction(Base):
         cascade="all, delete-orphan"
     )
 
+
+
 class TaxAnalysis(Base):
     __tablename__ = "tax_analysis"
 
@@ -62,6 +64,16 @@ class TaxAnalysis(Base):
     month: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     justification_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     legal_citation: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    risk_level: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    raw_analysis: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    
+    # Token Tracking
+    prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    estimated_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    estimated_cost_brl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    model_version: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     
     # Audit fields
     is_manual_override: Mapped[bool] = mapped_column(Boolean, default=False)

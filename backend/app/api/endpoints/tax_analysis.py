@@ -70,6 +70,8 @@ async def analyze_transaction_tax(
             txn.tax_analysis.month = analysis_result.mes_lancamento
             txn.tax_analysis.justification_text = justification
             txn.tax_analysis.legal_citation = analysis_result.citacao_legal
+            txn.tax_analysis.risk_level = analysis_result.risco_glosa
+            txn.tax_analysis.raw_analysis = analysis_result.model_dump(mode='json')
             txn.tax_analysis.is_manual_override = False
         else:
             # Create new
@@ -80,6 +82,8 @@ async def analyze_transaction_tax(
                 month=analysis_result.mes_lancamento,
                 justification_text=justification,
                 legal_citation=analysis_result.citacao_legal,
+                risk_level=analysis_result.risco_glosa,
+                raw_analysis=analysis_result.model_dump(mode='json'),
                 is_manual_override=False
             )
             db.add(new_analysis)
@@ -147,3 +151,134 @@ async def update_tax_analysis(
     await db.commit()
     await db.refresh(analysis)
     return analysis
+
+@router.post("/tax-analysis/batch")
+async def batch_analyze_transactions(
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Batch analyzes all pending transactions (with receipt but without analysis).
+    Rate limit: 1 request/second to respect Gemini Free Tier.
+    """
+    import asyncio
+    
+    # 1. Find pending transactions
+    # Join receipt (must have one) and ensure no tax_analysis exists
+    stmt = (
+        select(Transaction)
+        .options(
+            selectinload(Transaction.receipt)
+        )
+        .outerjoin(TaxAnalysis)
+        .where(
+            Transaction.receipt_id.is_not(None),
+            TaxAnalysis.id.is_(None) # Ensure no analysis linked
+        )
+    )
+    
+    result = await db.execute(stmt)
+    pending_txns = result.scalars().all()
+    
+    processed_count = 0
+    total_cost_brl = 0.0
+    
+    print(f"Batch Analysis: Found {len(pending_txns)} pending transactions.")
+    
+    for txn in pending_txns:
+        try:
+            # 2. Prepare Data
+            transaction_data = {
+                "id": str(txn.id),
+                "date": txn.date.strftime("%Y-%m-%d"),
+                "amount": float(txn.amount),
+                "merchant": txn.merchant_name,
+                "category": txn.category if txn.category else "Uncategorized"
+            }
+
+            receipt_content = ""
+            if txn.receipt and txn.receipt.raw_text:
+                receipt_content = txn.receipt.raw_text
+            elif txn.receipt:
+                receipt_content = f"Receipt file: {txn.receipt.original_filename}"
+            else:
+                receipt_content = "Nenhum comprovante vinculado."
+            
+            # 3. Analyze
+            analysis_result = await tax_agent.analyze_transaction(transaction_data, receipt_content)
+            
+            # 4. Save
+            # Create object (Logic Guard handled inside agent, but persistence here ensures we handle 'estimated_cost' if agent returns it? 
+            # Wait, Agent ALREADY persists to DB if we pass db_session!
+            # Let's check agent signature: analyze_transaction(..., db_session=None).
+            # If we pass db, it saves.
+            
+            # BUT, we are in a loop. We should pass the session.
+            # However agent commits or flushes? Agent calls `flush`.
+            # We must commit at the end or per item.
+            
+            # Wait, `tax_agent.analyze_transaction` (lines 162+) accepts `db_session`.
+            # If passed, it adds and flushes (lines 291-293).
+            
+            # Let's pass `db` to agent.
+            # But wait, we need to read the COST from the created analysis to aggregate `total_cost_brl`.
+            # The agent returns `TaxAnalysisResult` (Pydantic), which doesn't have the cost fields we added to DB model.
+            
+            # We can re-query the TaxAnalysis from DB buffer since it was flushed?
+            # Or we can rely on standard logging.
+            
+            # To get cost for return summary, we might need to modify agent to return cost or wrapper.
+            # Or just query the DB after flush.
+             
+            # Let's do:
+            async with db.begin_nested(): # Savepoint if needed, or just standard flow
+                # Actually agent uses `db_session.add`.
+                pass
+                
+            # We'll rely on the agent to save.
+            # We won't get cost easily from `analysis_result` (Pydantic).
+            # We can check the DB for the newly created record using txn.id.
+            
+            await tax_agent.analyze_transaction(transaction_data, receipt_content, db_session=db)
+            
+            # Retrieve cost for summary
+            # Since flush happened, we can query it.
+            # Or inspect `db.new` ?
+            # simpler: Query.
+            
+            # We need to commit to persist? Agent only flushes.
+            await db.commit() 
+            
+            # Get cost
+            analysis_check = await db.execute(select(TaxAnalysis).where(TaxAnalysis.transaction_id == txn.id))
+            created_analysis = analysis_check.scalar_one_or_none()
+            if created_analysis and created_analysis.estimated_cost_brl:
+                total_cost_brl += created_analysis.estimated_cost_brl
+
+            processed_count += 1
+            
+            # 5. Rate Limit (Gemini Free Tier: 5 RPM -> ~13s interval)
+            # Only sleep if we have more items to process
+            if processed_count < len(pending_txns):
+                await asyncio.sleep(13)
+                
+        except Exception as e:
+            err_str = str(e)
+            print(f"Error processing txn {txn.id}: {e}")
+            
+            # Check for Rate Limit (429)
+            if "429" in err_str or "ResourceExhausted" in err_str or "Quota" in err_str:
+                print(f"RATE LIMIT HIT. Stopping batch.")
+                return {
+                    "processed": processed_count,
+                    "total_cost_brl": total_cost_brl,
+                    "message": f"Stopped early due to Rate Limit (processed {processed_count} items)."
+                }
+            
+            # Continue to next if other error
+            continue
+            
+    return {
+        "processed": processed_count,
+        "total_cost_brl": total_cost_brl,
+        "message": f"Successfully analyzed {processed_count} transactions."
+    }

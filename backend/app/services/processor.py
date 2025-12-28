@@ -1,4 +1,5 @@
 import os
+import re
 import xml.etree.ElementTree as ET
 import pandas as pd
 import pdfplumber
@@ -213,6 +214,66 @@ from app.services.parsers.factory import ParserFactory
 
 # ...
 
+def _parse_itau_fast_track(text: str) -> dict | None:
+    """
+    Deterministic regex-based parser for Itaú receipts (Utilities & Auto-Debit).
+    Bypasses LLM if successful.
+    """
+    try:
+        from datetime import datetime
+        text_lower = text.lower()
+        
+        # 1. Signature Check
+        is_itau = "itaú" in text_lower or "itau" in text_lower
+        if not is_itau:
+            return None
+            
+        is_util = "água, luz, telefone" in text_lower or "concessionária" in text_lower
+        is_auto = "débito automático" in text_lower or "debito automatico" in text_lower
+        
+        if not (is_util or is_auto):
+            return None
+
+        # 2. Extraction
+        data = {}
+        
+        # Date: "efetuado em 27/06/2024", "realizado em...", "data do pagamento:..."
+        # Note: 'em' handles 'efetuado em' and 'realizado em'
+        date_match = re.search(r"(?:em|pagamento[:\s]*)\s*(\d{2}/\d{2}/\d{4})", text_lower)
+        if date_match:
+            try:
+                dt_obj = datetime.strptime(date_match.group(1), "%d/%m/%Y")
+                data["date"] = dt_obj.strftime("%Y-%m-%d")
+            except:
+                pass
+
+        # Amount: "valor do documento R$ 101,57", "valor: R$ 300,00"
+        # Handles 1.234,56 format
+        amount_match = re.search(r"valor(?:.*?)\s*(?:r\$\s*)?([\d\.]+,\d{2})", text_lower)
+        if amount_match:
+            try:
+                # Remove thousands separator (dot), replace decimal (comma) with dot
+                val_str = amount_match.group(1).replace(".", "").replace(",", ".")
+                data["amount"] = float(val_str)
+            except:
+                pass
+
+        # Merchant: "identificação no extrato: NAME"
+        merch_match = re.search(r"identificação no extrato[:\s]*([^\n\r]+)", text_lower)
+        if merch_match:
+            data["merchant_or_bank"] = merch_match.group(1).strip().upper()
+
+        # 3. Validation (All 3 required)
+        if data.get("date") and data.get("amount") is not None and data.get("merchant_or_bank"):
+            data["doc_type"] = "RECEIPT"
+            data["transactions"] = None # Single receipt
+            return data
+            
+    except Exception as e:
+        print(f"DEBUG: Fast-Track Itaú Error: {e}")
+    
+    return None
+
 def extract_structured_data(state: ProcessingState) -> ProcessingState:
     """Uses Strategy Pattern to structure data from raw content."""
     if state.get("error"):
@@ -225,9 +286,16 @@ def extract_structured_data(state: ProcessingState) -> ProcessingState:
     raw_text = current_doc.raw_content
 
     try:
-        # Use Factory to get the correct parser (XP, Generic, etc.)
-        parser = ParserFactory.get_parser(raw_text)
-        result = parser.extract(raw_text)
+        # 1. Fast-Track: Try Regex Parser first
+        fast_track_result = _parse_itau_fast_track(raw_text)
+        
+        if fast_track_result:
+             print(f"FAST-TRACK: Successfully parsed Itaú Receipt via Regex.")
+             result = fast_track_result
+        else:
+             # 2. Slow-Track: Use Factory (LLM/Generic Parsers)
+             parser = ParserFactory.get_parser(raw_text)
+             result = parser.extract(raw_text)
         
         # Merge result
         updated_doc = FinancialDocument(

@@ -2,10 +2,11 @@ import React, { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { updateTaxAnalysis, analyzeTax } from '../lib/api';
 import type { TaxAnalysis } from '../lib/api';
-import { CheckCircle2, AlertTriangle, XCircle, Edit2, Save, X, BookOpen, Scale, PlayCircle, Loader2 } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, XCircle, Edit2, Save, X, BookOpen, Scale, PlayCircle, Loader2, Copy, CheckSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import ReactMarkdown from 'react-markdown';
 
 function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs));
@@ -61,6 +62,11 @@ export const TaxAnalysisPanel: React.FC<TaxAnalysisPanelProps> = ({ transactionI
         updateMutation.mutate(editForm);
     };
 
+    const copyToClipboard = (text: string) => {
+        navigator.clipboard.writeText(text);
+        toast.success("Copied to clipboard");
+    };
+
     if (!initialAnalysis && !isAnalyzing) {
         return (
             <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 flex flex-col items-center gap-3 text-center">
@@ -103,6 +109,20 @@ export const TaxAnalysisPanel: React.FC<TaxAnalysisPanelProps> = ({ transactionI
         if (lower.includes('parcial')) return <AlertTriangle className="w-4 h-4" />;
         return <XCircle className="w-4 h-4" />;
     };
+
+    const getRiskColor = (risk?: string | null) => {
+        const r = (risk || '').toLowerCase();
+        if (r === 'baixo') return "text-emerald-600 dark:text-emerald-400";
+        if (r === 'médio' || r === 'medio') return "text-yellow-600 dark:text-yellow-400";
+        if (r === 'alto') return "text-red-600 dark:text-red-400";
+        return "text-slate-500";
+    };
+
+    // Extract checklist from raw_analysis or fallback to parsing justification (less reliable)
+    const checklistItems = analysis.raw_analysis?.checklist || [];
+    // If raw_analysis is empty (legacy data), we might show full justification.
+    // Ideally we prefer raw_analysis.comentario as the clean justification.
+    const justificationDisplay = analysis.raw_analysis?.comentario || analysis.justification_text || "Sem justificativa.";
 
     if (isEditing) {
         return (
@@ -196,11 +216,17 @@ export const TaxAnalysisPanel: React.FC<TaxAnalysisPanelProps> = ({ transactionI
         <div className="bg-white dark:bg-slate-950 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden relative group/panel">
             {/* Header / Banner */}
             <div className="flex items-center justify-between p-3 bg-slate-50/50 dark:bg-slate-900/50 border-b border-slate-100 dark:border-slate-800">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
                     <div className={cn("flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border shadow-sm", getClassificationColor(analysis.classification))}>
                         {getClassificationIcon(analysis.classification)}
                         {analysis.classification}
                     </div>
+                    {analysis.risk_level && (
+                        <div className="flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                            <span className="text-slate-500 dark:text-slate-400">Risco:</span>
+                            <span className={cn(getRiskColor(analysis.risk_level))}>{analysis.risk_level}</span>
+                        </div>
+                    )}
                     {analysis.is_manual_override && (
                         <span className="text-[10px] uppercase font-bold text-slate-400 border border-slate-200 px-1.5 py-0.5 rounded">Manual</span>
                     )}
@@ -236,25 +262,58 @@ export const TaxAnalysisPanel: React.FC<TaxAnalysisPanelProps> = ({ transactionI
                 </div>
 
                 {/* Legal Justification Box */}
-                <div className="bg-slate-50 dark:bg-slate-900/50 rounded-md border border-slate-200 dark:border-slate-800 p-3">
-                    <div className="flex items-center gap-2 mb-2">
-                        <Scale className="w-4 h-4 text-purple-600 dark:text-purple-400" />
-                        <h5 className="text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wide">Justificativa Legal</h5>
+                <div className="bg-slate-50 dark:bg-slate-900/50 rounded-md border border-slate-200 dark:border-slate-800 overflow-hidden">
+                    <div className="px-3 py-2 bg-slate-100/50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                            <Scale className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                            <h5 className="text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wide">Justificativa Legal</h5>
+                        </div>
+                        <button
+                            onClick={() => copyToClipboard(justificationDisplay)}
+                            className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+                            title="Copy Justification"
+                        >
+                            <Copy className="w-3.5 h-3.5" />
+                        </button>
                     </div>
 
-                    <p className="text-sm text-slate-600 dark:text-slate-400 whitespace-pre-line leading-relaxed">
-                        {analysis.justification_text || "Sem justificativa."}
-                    </p>
+                    <div className="p-3">
+                        <div className="text-sm text-slate-600 dark:text-slate-400 prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2">
+                            <ReactMarkdown>{justificationDisplay}</ReactMarkdown>
+                        </div>
+                    </div>
+                </div>
 
-                    {analysis.legal_citation && (
-                        <div className="mt-3 pt-2 border-t border-slate-200 dark:border-slate-700 flex items-start gap-2">
-                            <BookOpen className="w-3.5 h-3.5 text-slate-400 mt-0.5" />
-                            <span className="text-xs font-medium text-slate-500 dark:text-slate-400 italic">
+                {/* Checklist Section */}
+                {checklistItems.length > 0 && (
+                    <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                            <CheckSquare className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                            <h5 className="text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wide">Checklist de Comprovação</h5>
+                        </div>
+                        <ul className="space-y-1">
+                            {checklistItems.map((item, idx) => (
+                                <li key={idx} className="flex items-start gap-2 text-sm text-slate-600 dark:text-slate-400">
+                                    <div className="mt-1.5 w-1 h-1 rounded-full bg-blue-400 flex-shrink-0" />
+                                    <span>{item}</span>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+
+                {analysis.legal_citation && (
+                    <div className="flex items-start gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                        <BookOpen className="w-4 h-4 text-slate-400 mt-0.5 flex-shrink-0" />
+                        <div>
+                            <span className="block text-xs font-semibold text-slate-500 mb-0.5">Citação Legal Base</span>
+                            <span className="text-sm font-medium text-slate-700 dark:text-slate-300 italic">
                                 {analysis.legal_citation}
                             </span>
                         </div>
-                    )}
-                </div>
+                    </div>
+                )}
+
             </div>
         </div>
     );

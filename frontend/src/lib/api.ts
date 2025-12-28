@@ -10,6 +10,11 @@ export interface TaxAnalysis {
     month: string | null;
     justification_text: string | null;
     legal_citation: string | null;
+    risk_level?: string | null;
+    raw_analysis?: {
+        checklist?: string[];
+        comentario?: string;
+    } | null;
     is_manual_override: boolean;
 }
 

@@ -1,4 +1,5 @@
 import { ReconWorkbench } from './components/ReconWorkbench';
+import { TaxReportDownload } from './components/TaxReportDownload';
 import { Toaster } from 'sonner';
 
 function App() {
@@ -41,6 +42,11 @@ function App() {
           <p className="max-w-2xl mx-auto text-lg text-slate-600 dark:text-slate-400">
             Automate your accounting by matching bank statements with receipts and invoices.
           </p>
+        </section>
+
+        {/* Reports Section */}
+        <section className="space-y-4">
+          <TaxReportDownload />
         </section>
 
         {/* Reconciliation Workbench */}

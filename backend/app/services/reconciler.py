@@ -4,13 +4,15 @@ from app.db.models import Transaction, FinancialDocument
 from thefuzz import fuzz
 from datetime import timedelta
 
+from sqlalchemy.orm import selectinload
+
 class ReconciliationEngine:
     async def run_auto_reconciliation(self, session: AsyncSession) -> dict:
         results = {"matches_found": 0, "details": []}
         
         # 1. Fetch Candidates
         # Bank Transactions: From Bank Statements, not yet linked
-        stmt_bank = select(Transaction).join(Transaction.document).where(
+        stmt_bank = select(Transaction).options(selectinload(Transaction.tax_analysis)).join(Transaction.document).where(
             FinancialDocument.doc_type == "BANK_STATEMENT",
             Transaction.receipt_id.is_(None)
         )
