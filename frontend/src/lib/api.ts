@@ -39,6 +39,7 @@ export interface FinancialDocument {
     status: string; // 'PENDING' | 'PROCESSED' | 'ERROR'
     created_at: string; // ISO string
     raw_text?: string;
+    linked_transaction_id?: string | null;
     transactions?: Transaction[];
 }
 
@@ -94,6 +95,36 @@ export const uploadDocument = async (file: File, docType?: 'BANK_STATEMENT' | 'R
     return response.data;
 };
 
+export const uploadStatement = async (file: File, password?: string): Promise<UploadResponse> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (password) {
+        formData.append('password', password);
+    }
+    // Dynamic timeout
+    const timeout = Math.max(300000, file.size / 20);
+    const response = await apiClient.post<UploadResponse>('/recon/upload/statement', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: timeout
+    });
+    return response.data;
+};
+
+export const uploadReceipt = async (file: File, password?: string): Promise<UploadResponse> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (password) {
+        formData.append('password', password);
+    }
+    // Dynamic timeout
+    const timeout = Math.max(300000, file.size / 20);
+    const response = await apiClient.post<UploadResponse>('/recon/upload/receipt', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: timeout
+    });
+    return response.data;
+};
+
 export const getDocuments = async (docType?: string): Promise<FinancialDocument[]> => {
     const response = await apiClient.get<FinancialDocument[]>('/recon/documents', {
         params: { doc_type: docType }
@@ -107,6 +138,11 @@ export const deleteDocument = async (id: string): Promise<void> => {
 
 export const resetWorkspace = async (): Promise<void> => {
     await apiClient.delete('/recon/reset');
+};
+
+export const updateDocument = async (id: string, data: { date?: string; amount?: number }): Promise<FinancialDocument> => {
+    const response = await apiClient.patch<FinancialDocument>(`/recon/documents/${id}`, data);
+    return response.data;
 };
 
 export const getTransactions = async (unlinkedOnly: boolean = false, docType?: string): Promise<Transaction[]> => {
@@ -127,6 +163,13 @@ export const manualMatch = async (transactionId: string, receiptId: string, forc
 
 export const analyzeTax = async (transactionId: string): Promise<TaxAnalysis> => {
     const response = await apiClient.post<TaxAnalysis>(`/tax-analysis/${transactionId}`);
+    return response.data;
+};
+
+export const analyzeBatch = async (limit: number = 1): Promise<{ message: string; status: string }> => {
+    const response = await apiClient.post<{ message: string; status: string }>(`/tax/analyze-batch`, null, {
+        params: { limit_batch: limit }
+    });
     return response.data;
 };
 

@@ -15,21 +15,16 @@ O **Finance Recon AI** é uma solução de engenharia de dados financeiros proje
 ## ✨ Funcionalidades Core (v1.5)
 
 * 🧠 **TaxExpertAgent (Multi-Provider RAG):** Agente especializado em IRPF/Livro-Caixa operando com Gemini 2.5 Flash/Pro e GPT-5.2.
-* 🔄 **Reconciliação N:1 (Parcelamento):** Algoritmo capaz de identificar e vincular múltiplas transações bancárias (parcelas) a uma única Nota Fiscal.
-* ⚡ **Ingestão Determinística (Fast-Track):** Parsers Regex para Itaú (Utilidades/Débito) e DANFE, reduzindo latência de minutos para milissegundos.
-* 📈 **Telemetria de Custos:** Rastreamento de tokens e conversão dinâmica de custos de análise (USD para BRL).
-* 📑 **Exportador Carnê-Leão:** Geração de CSVs padronizados conforme o layout da Receita Federal Brasileira.
+* 🔄 **Reconciliação Soberana:** Motor híbrido que suporta vínculos automáticos (janela de 45 dias para NF-e) e manuais (Drag-and-Drop) ignorando discrepâncias de data para respeitar o fato gerador bancário.
+* ⚡ **Ingestão Determinística (Fast-Track):** Parsers Regex/Fuzzy para Itaú e DANFE com "Zero-Inference Policy" (datas e valores nulos forçam revisão em vez de assumir dados falsos).
+* 📈 **Telemetria de Custos:** Rastreamento granular de tokens e conversão dinâmica de custos de análise (USD para BRL) integrada ao banco de dados.
+* 📑 **Exportador Carnê-Leão:** Geração de CSVs padronizados conforme o layout da Receita Federal com mapeamento de plano de contas (P10.01.x).
 
 ## 🚀 Engineering Highlights
 
-1.  **Quota Guard & Throttling:**
-    Controle rigoroso de RPM (5 req/min) com intervalos de 13s para estabilidade no Free Tier do Gemini.
-    
-2.  **Persistência JSONB:**
-    Armazenamento integral das análises fiscais e checklists para auditoria retroativa e faturamento.
-
-3.  **UI de Auditoria Fiscal:**
-    Interface em React/Tailwind v4 com suporte a Markdown para justificativas legais e badges de Risco de Glosa.
+1.  **Quota Guard & Throttling:** Controle de RPM (5 req/min) com intervalos de 13s entre chamadas de IA para estabilidade e conformidade com limites de API.
+2.  **Integridade Contábil (Nullable Schema):** Migração do banco para suportar datas e valores nulos, garantindo que o sistema nunca invente dados fiscais (User-in-the-Loop).
+3.  **UI de Auditoria Sincronizada:** Interface React/Tailwind v4 com ordenação por valor absoluto e filtros sincronizados entre Extrato e Comprovantes.
 
 ## 🏗️ Arquitetura
 

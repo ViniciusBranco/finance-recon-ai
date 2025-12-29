@@ -17,8 +17,10 @@ class FinancialDocument(Base):
     original_filename: Mapped[str] = mapped_column(String, nullable=False, server_default="unknown.pdf")
     file_hash: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True)
     doc_type: Mapped[str] = mapped_column(String, nullable=False) # RECEIPT, BANK_STATEMENT, UNKNOWN
-    status: Mapped[str] = mapped_column(String, default="PENDING") # PENDING, PROCESSED, ERROR
+    status: Mapped[str] = mapped_column(String, default="PROCESSED") # PROCESSED, REQUIRES_REVIEW, MANUAL_EDITED
     raw_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ingestion_method: Mapped[Optional[str]] = mapped_column(String, nullable=True) # FAST_TRACK, LLM_FALLBACK
+    ingestion_logs: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     
     transactions: Mapped[list["Transaction"]] = relationship(
@@ -33,7 +35,7 @@ class Transaction(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("financial_documents.id"), nullable=False)
     merchant_name: Mapped[str] = mapped_column(String, nullable=False)
-    date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 

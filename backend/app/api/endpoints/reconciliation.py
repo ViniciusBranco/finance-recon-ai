@@ -19,16 +19,7 @@ router = APIRouter()
 
 UPLOAD_DIR = "/tmp/uploads"
 
-@router.post("/upload", summary="Upload and process a financial document")
-async def upload_document(
-    file: UploadFile = File(...),
-    password: str | None = Form(None),
-    expected_type: str | None = Form(None),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Uploads a file, checks for duplicates, and triggers processing.
-    """
+async def _handle_upload(file: UploadFile, password: str | None, expected_type: str | None, db: AsyncSession):
     if not os.path.exists(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -110,6 +101,34 @@ async def upload_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal processing error: {str(e)}")
 
+@router.post("/upload", summary="Upload and process a financial document")
+async def upload_document(
+    file: UploadFile = File(...),
+    password: str | None = Form(None),
+    expected_type: str | None = Form(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """Generic upload endpoint."""
+    return await _handle_upload(file, password, expected_type, db)
+
+@router.post("/upload/statement", summary="Upload a Bank Statement")
+async def upload_statement(
+    file: UploadFile = File(...),
+    password: str | None = Form(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """Specialized endpoint for Bank Statements."""
+    return await _handle_upload(file, password, "BANK_STATEMENT", db)
+
+@router.post("/upload/receipt", summary="Upload a Receipt")
+async def upload_receipt(
+    file: UploadFile = File(...),
+    password: str | None = Form(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """Specialized endpoint for Receipts (Pix, Boleto, NFe)."""
+    return await _handle_upload(file, password, "RECEIPT", db)
+
 @router.post("/reconcile")
 async def reconcile_transactions():
     """
@@ -142,7 +161,21 @@ async def get_documents(
         
     stmt = stmt.order_by(FinancialDocument.created_at.desc())
     result = await db.execute(stmt)
-    return result.scalars().all()
+    docs = result.scalars().all()
+
+    # Populate linked_transaction_id for Receipts
+    if docs:
+        doc_ids = [d.id for d in docs]
+        link_stmt = select(Transaction.id, Transaction.receipt_id).where(Transaction.receipt_id.in_(doc_ids))
+        link_res = await db.execute(link_stmt)
+        # Map receipt_id -> transaction_id
+        links = {rid: tid for tid, rid in link_res.all()}
+        
+        for d in docs:
+            # Dynamically attach attribute for Pydantic
+            setattr(d, "linked_transaction_id", links.get(d.id))
+
+    return docs
 
 @router.get("/transactions", response_model=List[TransactionResponse])
 async def get_transactions(
@@ -207,7 +240,72 @@ async def delete_document(document_id: uuid.UUID, db: AsyncSession = Depends(get
 
 
 
-@router.post("/transactions/{transaction_id}/match", status_code=status.HTTP_200_OK)
+from app.schemas.document import FinancialDocumentUpdate
+
+@router.patch("/documents/{document_id}", response_model=FinancialDocumentResponse)
+async def update_document(
+    document_id: uuid.UUID,
+    update_data: FinancialDocumentUpdate,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Manually update document details (Date/Amount/Merchant).
+    Useful for correcting OCR errors.
+    """
+    stmt = select(FinancialDocument).options(selectinload(FinancialDocument.transactions)).where(FinancialDocument.id == document_id)
+    doc = (await db.execute(stmt)).scalar_one_or_none()
+    
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    updated = False
+    tx = doc.transactions[0] if doc.transactions else None
+    
+    if tx:
+        if update_data.amount is not None:
+             tx.amount = update_data.amount
+             updated = True
+        if update_data.date is not None:
+             tx.date = update_data.date
+             updated = True
+        
+        # Determine if merchant_name is in update_data (it's Pydantic model)
+        # Using getattr to be safe if schema not yet updated
+        m_name = getattr(update_data, "merchant_name", None)
+        if m_name:
+             tx.merchant_name = m_name
+             updated = True
+
+
+
+    else:
+        # Create a new transaction if none exists
+        if update_data.date and update_data.amount is not None:
+            new_txn = Transaction(
+                document_id=document_id,
+                merchant_name=doc.original_filename or "Manual Entry",
+                date=update_data.date,
+                amount=update_data.amount,
+                category="Manual Override"
+            )
+            db.add(new_txn)
+            updated = True
+        elif update_data.date or update_data.amount is not None:
+             raise HTTPException(status_code=400, detail="Both Date and Amount are required to create a new transaction entry.")
+
+    if updated:
+        doc.status = "MANUAL_EDITED"
+
+    await db.commit()
+    
+    # Return updated document
+    stmt = select(FinancialDocument).options(
+        selectinload(FinancialDocument.transactions).selectinload(Transaction.tax_analysis)
+    ).where(FinancialDocument.id == document_id)
+    
+    updated_doc = (await db.execute(stmt)).scalar_one()
+    return updated_doc
+@router.post("/transactions/{transaction_id}/match")
 async def manual_match_transaction(
     transaction_id: uuid.UUID,
     match_request: ManualMatchRequest,
@@ -218,9 +316,11 @@ async def manual_match_transaction(
     Checks for discrepancies unless force=True.
     """
     # 1. Fetch Transaction
+    print(f"DEBUG: Matching Txn {transaction_id} with Receipt {match_request.receipt_id}")
     txn = await db.get(Transaction, transaction_id)
     if not txn:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+        print(f"DEBUG: Transaction ID {transaction_id} NOT FOUND.")
+        raise HTTPException(status_code=404, detail=f"Transaction {transaction_id} not found")
 
     # 2. Fetch Receipt (with Transactions)
     stmt = select(FinancialDocument).options(selectinload(FinancialDocument.transactions)).where(FinancialDocument.id == match_request.receipt_id)
@@ -228,7 +328,19 @@ async def manual_match_transaction(
     receipt = receipt_res.scalar_one_or_none()
 
     if not receipt:
-        raise HTTPException(status_code=404, detail="Receipt document not found")
+        # Fallback: Maybe the UI sent the Receipt's Transaction ID?
+        print(f"DEBUG: Receipt Doc {match_request.receipt_id} not found. Checking if it is a Transaction ID...")
+        stmt_tx = select(Transaction).where(Transaction.id == match_request.receipt_id)
+        receipt_tx = (await db.execute(stmt_tx)).scalar_one_or_none()
+        
+        if receipt_tx and receipt_tx.document_id:
+             print(f"DEBUG: Resolved ID {match_request.receipt_id} to Document {receipt_tx.document_id}")
+             stmt = select(FinancialDocument).options(selectinload(FinancialDocument.transactions)).where(FinancialDocument.id == receipt_tx.document_id)
+             receipt = (await db.execute(stmt)).scalar_one_or_none()
+    
+    if not receipt:
+        print(f"DEBUG: Receipt {match_request.receipt_id} not found in DB (neither as Doc nor Txn).")
+        raise HTTPException(status_code=404, detail=f"Receipt {match_request.receipt_id} not found in DB")
         
     if receipt.doc_type != "RECEIPT":
          raise HTTPException(status_code=400, detail="Document provided is not a Receipt")
@@ -261,16 +373,10 @@ async def manual_match_transaction(
              if diff > 0.05:
                  warnings.append(f"Diferença de valor detectada: R$ {abs(float(txn.amount))} vs R$ {abs(float(r_amount))}")
         
-        # If Receipt Date is known
-        if r_date is not None:
-            # r_date (from DB) is typically a date object
-            try:
-                if txn.date != r_date:
-                     txn_str = txn.date.strftime("%d/%m")
-                     rec_str = r_date.strftime("%d/%m")
-                     warnings.append(f"Date Mismatch: Receipt is {rec_str} but Transaction is {txn_str}. Confirm match?")
-            except:
-                pass # Date parsing failed, ignore warning
+        # If Receipt Date is known - IGNORE DATE MISMATCHES FOR MANUAL MATCH
+        # We allow manual override of dates (Bank clearing delays etc).
+        # if r_date is not None:
+        #    ... (Date logic skipped) ...
                 
         if warnings:
             raise HTTPException(
@@ -284,7 +390,6 @@ async def manual_match_transaction(
     txn.match_type = "MANUAL"
     
     await db.commit()
-    
     return {"message": "Match confirmed"}
 
 @router.delete("/reset", status_code=status.HTTP_200_OK)

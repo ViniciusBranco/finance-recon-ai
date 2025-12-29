@@ -216,66 +216,355 @@ from app.services.parsers.factory import ParserFactory
 
 def _parse_itau_fast_track(text: str) -> dict | None:
     """
-    Deterministic regex-based parser for Itaú receipts (Utilities & Auto-Debit).
-    Bypasses LLM if successful.
+    Parser determinístico aprimorado para múltiplos layouts Itaú (Pix, Títulos, Transferências).
     """
     try:
         from datetime import datetime
         text_lower = text.lower()
         
-        # 1. Signature Check
-        is_itau = "itaú" in text_lower or "itau" in text_lower
-        if not is_itau:
-            return None
-            
-        is_util = "água, luz, telefone" in text_lower or "concessionária" in text_lower
-        is_auto = "débito automático" in text_lower or "debito automatico" in text_lower
-        
-        if not (is_util or is_auto):
+        # 1. Validação de Assinatura (Expandida)
+        keywords = ["itaú", "itau", "unibanco", "comprovante de transação", "comprovante de pix", "solicitação de transferência"]
+        if not any(k in text_lower for k in keywords):
             return None
 
-        # 2. Extraction
         data = {}
         
-        # Date: "efetuado em 27/06/2024", "realizado em...", "data do pagamento:..."
-        # Note: 'em' handles 'efetuado em' and 'realizado em'
-        date_match = re.search(r"(?:em|pagamento[:\s]*)\s*(\d{2}/\d{2}/\d{4})", text_lower)
-        if date_match:
-            try:
-                dt_obj = datetime.strptime(date_match.group(1), "%d/%m/%Y")
+        # 2. Extração de Data
+        # Padrão A: Explicit labels
+        date_explicit = re.search(r"(?:data da transferência|data de pagamento|data)\s*[:\s]*(\d{2}/\d{2}/\d{4})", text_lower)
+        if date_explicit:
+             try:
+                dt_obj = datetime.strptime(date_explicit.group(1), "%d/%m/%Y")
                 data["date"] = dt_obj.strftime("%Y-%m-%d")
-            except:
-                pass
+             except: pass
+             
+        if not data.get("date"):
+            # Padrão B: DD/MM/YYYY dates generic
+            date_num_match = re.search(r"(\d{2}/\d{2}/\d{4})", text_lower)
+            if date_num_match:
+                try:
+                    dt_obj = datetime.strptime(date_num_match.group(1), "%d/%m/%Y")
+                    data["date"] = dt_obj.strftime("%Y-%m-%d")
+                except: pass
+            else:
+                # Padrão C: 05 nov de 2025
+                months_map = {
+                    'jan': '01', 'fev': '02', 'mar': '03', 'abr': '04', 'mai': '05', 'jun': '06',
+                    'jul': '07', 'ago': '08', 'set': '09', 'out': '10', 'nov': '11', 'dez': '12',
+                    'janeiro': '01', 'fevereiro': '02', 'março': '03', 'abril': '04', 'maio': '05', 'junho': '06',
+                    'julho': '07', 'agosto': '08', 'setembro': '09', 'outubro': '10', 'novembro': '11', 'dezembro': '12'
+                }
+                date_ext_match = re.search(r"(\d{1,2})\s+([a-zç]+)\s+de\s+(\d{4})", text_lower)
+                if date_ext_match:
+                    day, month_ext, year = date_ext_match.groups()
+                    mon_code = next((v for k, v in months_map.items() if month_ext.startswith(k)), None)
+                    if mon_code:
+                         data["date"] = f"{year}-{mon_code}-{day.zfill(2)}"
 
-        # Amount: "valor do documento R$ 101,57", "valor: R$ 300,00"
-        # Handles 1.234,56 format
-        amount_match = re.search(r"valor(?:.*?)\s*(?:r\$\s*)?([\d\.]+,\d{2})", text_lower)
+        # 3. Extração de Valor
+        # Padrão A: Explicit labels
+        amount_match = re.search(r"(?:valor da transferência|valor pago|valor total|valor)\s*[:\s]*r?\$?\s*([\d\.]+,\d{2})", text_lower)
+        if not amount_match:
+             # Padrão B: Generic R$
+             amount_match = re.search(r"r\$\s*([\d\.]+,\d{2})", text_lower)
+        
         if amount_match:
             try:
-                # Remove thousands separator (dot), replace decimal (comma) with dot
                 val_str = amount_match.group(1).replace(".", "").replace(",", ".")
                 data["amount"] = float(val_str)
-            except:
-                pass
+            except: pass
 
-        # Merchant: "identificação no extrato: NAME"
-        merch_match = re.search(r"identificação no extrato[:\s]*([^\n\r]+)", text_lower)
+        # 4. Extração de Favorecido
+        # Tenta capturar linha inteira
+        merch_match = re.search(r"(?:favorecido|beneficiário|nome|destino)[:\s]*([^\n\r]+)", text_lower)
+        if not merch_match:
+            # Pix "Para" pattern
+            merch_match = re.search(r"para\s*\n\s*([^\n\r]+)", text_lower)
+        
         if merch_match:
-            data["merchant_or_bank"] = merch_match.group(1).strip().upper()
+            raw_cand = merch_match.group(1).strip().upper()
+            # Clean CNPJ/CPF noise if explicit match
+            clean_cand = re.split(r"CNPJ|CPF|\d{2}\.|CHAVE", raw_cand)[0].strip()
+            clean_cand = clean_cand.strip(" -:.,")
+            
+            if len(clean_cand) > 3:
+                 data["merchant_or_bank"] = clean_cand
 
-        # 3. Validation (All 3 required)
-        if data.get("date") and data.get("amount") is not None and data.get("merchant_or_bank"):
+        # 5. Validação
+        if data.get("date") and data.get("amount") is not None:
+            if not data.get("merchant_or_bank"):
+                data["merchant_or_bank"] = "COMPROVANTE ITAU"
             data["doc_type"] = "RECEIPT"
-            data["transactions"] = None # Single receipt
+            data["transactions"] = None
             return data
             
     except Exception as e:
         print(f"DEBUG: Fast-Track Itaú Error: {e}")
-    
     return None
 
+def _extract_transactions_generic(text: str) -> dict | None:
+    """Regex-based extraction for standard Bank Statements (Date Description Amount)."""
+    transactions = []
+    lines = text.split('\n')
+    
+    # Generic Pattern: Date (DD/MM/YYYY or DD/MM) ... Description ... Amount (X.XXX,XX)
+    pattern = re.compile(r"(\d{2}/\d{2}(?:/\d{4})?)\s+(.*?)\s+([-\+]?[\d\.]+,\d{2}[DC]?)")
+    
+    from datetime import datetime
+    today = datetime.now()
+    
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        
+        if "saldo" in line.lower() or "data" in line.lower():
+            continue
+
+        match = pattern.search(line)
+        if match:
+            date_str, desc, amount_str = match.groups()
+            
+            desc = desc.strip()
+            if len(desc) < 3: continue 
+            
+            try:
+                # Amount Parsing
+                is_negative = False
+                clean_amt_str = amount_str.upper()
+                
+                if clean_amt_str.endswith('D'):
+                    is_negative = True
+                    clean_amt_str = clean_amt_str[:-1].strip()
+                elif clean_amt_str.endswith('C'):
+                    is_negative = False
+                    clean_amt_str = clean_amt_str[:-1].strip()
+                
+                if clean_amt_str.startswith('-'):
+                    is_negative = True
+                    clean_amt_str = clean_amt_str[1:].strip()
+                
+                val = float(clean_amt_str.replace('.', '').replace(',', '.'))
+                
+                if is_negative: val = -abs(val)
+                else: val = abs(val) # Bank statement: usually abs value + D suffix = negative
+                
+                # Date Parsing
+                if len(date_str) <= 5: # DD/MM
+                    # Try to infer year from header if possible, else current year
+                    dt_val = f"{today.year}-{date_str[3:5]}-{date_str[0:2]}"
+                else:
+                     dt_obj = datetime.strptime(date_str, "%d/%m/%Y")
+                     dt_val = dt_obj.strftime("%Y-%m-%d")
+
+                transactions.append({
+                    "date": dt_val,
+                    "description": desc,
+                    "merchant_or_bank": desc,
+                    "amount": val,
+                    "currency": "BRL"
+                })
+            except Exception:
+                continue
+
+    if len(transactions) > 0:
+        return {
+            "doc_type": "BANK_STATEMENT",
+            "transactions": transactions,
+            "merchant_or_bank": "Bank Statement Import"
+        }
+    return None
+
+def _parse_danfe_fast_track(text: str) -> dict | None:
+    """Extração robusta de NF-e com Estratégia Multi-Anchor."""
+    try:
+        from datetime import datetime
+        
+        # 1. Normalize
+        text_flat = re.sub(r'[\s\n\r\t]+', ' ', text).upper()
+        digits_only = re.sub(r'\D', '', text)
+        if not re.search(r'(\d{44})', digits_only): return None
+        
+        data = {
+            "doc_type": "RECEIPT", 
+            "merchant_or_bank": "NF-E DANFE",
+            "amount": 0.0,
+            "date": None
+        }
+
+        # 2. Date Strategy (Aggressive + Raw Text Fallback)
+        
+        # 2.1 Global Scan on Raw Text (first 2000 chars)
+        raw_head = text[:2000]
+        # Robust regex for DD/MM/YYYY
+        all_dates_raw = re.findall(r"(\d{2}/\d{2}/\d{4})", raw_head)
+        
+        # Validation Filter: Remove dates that are clearly outliers (e.g. 0000) or probably birthdays/etc if strict
+        # For now, just ensure valid datetime parsing
+        valid_dates = []
+        now_year = datetime.now().year
+        for d_str in all_dates_raw:
+             try:
+                 d_obj = datetime.strptime(d_str, "%d/%m/%Y")
+                 if 2000 <= d_obj.year <= now_year + 1:
+                     valid_dates.append(d_str)
+             except: pass
+
+        priority_date = None
+        
+        # 2.2 Prioritized Context Check (Case Insensitive)
+        # Expanded check for multiple redundant labels like ZL Dental PDF
+        strong_signals = [
+            (r"EMISS[ÃA]O", 100),
+            (r"DATA\s*DA\s*EMISS[ÃA]O", 100),
+            (r"DATA\s*DE\s*EMISS[ÃA]O", 100),
+            (r"DATA\s*EMISS[ÃA]O", 100),
+            (r"SA[ÍI]DA", 100),
+            (r"PROTOCOLO", 150),
+            (r"DATA\s*DO\s*PROTOCOLO", 150)
+        ]
+        
+        for lbl, winsize in strong_signals:
+            # Case insensitive search
+            lbl_matches = re.finditer(lbl, raw_head, re.IGNORECASE)
+            for lbl_match in lbl_matches:
+                window = raw_head[lbl_match.end():lbl_match.end()+winsize]
+                dt_match = re.search(r"(\d{2}/\d{2}/\d{4})", window)
+                if dt_match:
+                    d_candidate = dt_match.group(1)
+                    # Filter logic
+                    try:
+                        d_obj = datetime.strptime(d_candidate, "%d/%m/%Y")
+                        if 2000 <= d_obj.year <= now_year + 1:
+                            priority_date = d_candidate
+                            break
+                    except: pass
+            if priority_date:
+                break
+        
+        if priority_date:
+            try:
+                data["date"] = datetime.strptime(priority_date, "%d/%m/%Y").strftime("%Y-%m-%d")
+            except: pass
+        
+        # 2.3 Fallback to valid dates found
+        if not data["date"] and valid_dates:
+            # Prefer the first one found in raw order as header usually starts with date
+            try:
+                data["date"] = datetime.strptime(valid_dates[0], "%d/%m/%Y").strftime("%Y-%m-%d")
+            except: pass
+        
+        # 3. Amount Strategy
+        amount_strategies = [
+            (r"VALOR\s*TOTAL\s*DA\s*(?:NOTA|NF)", 120),
+            (r"VALOR\s*A\s*PAGAR", 100),
+            (r"TOTAL\s*A\s*PAGAR", 100),
+            (r"VALOR\s*LIQUIDO", 100)
+        ]
+        
+        vals = []
+        for pat, win_size in amount_strategies:
+             match = re.search(pat, text_flat)
+             if match:
+                 window = text_flat[match.end():match.end()+win_size]
+                 cur_matches = re.finditer(r"([\d\.]+,\d{2})", window)
+                 for cm in cur_matches:
+                     try:
+                         val = float(cm.group(1).replace(".", "").replace(",", "."))
+                         if val > 0: vals.append(val)
+                     except: pass
+        
+        if vals:
+             data["amount"] = max(vals)
+
+        # Fallback: Largest value in document (Aggressive)
+        if data["amount"] == 0.0:
+             # Find all currency-like patterns
+             avg_matches = re.findall(r"(?:R\$|VALOR)\s*([\d\.]+,\d{2})", text_flat) # Anchored
+             if not avg_matches:
+                 avg_matches = re.findall(r"(?<!\d)([\d\.]+,\d{2})", text_flat) # Unanchored (Riskier)
+             
+             all_vals = []
+             for m in avg_matches:
+                 try: 
+                     v = float(m.replace(".", "").replace(",", "."))
+                     if v > 0: all_vals.append(v)
+                 except: pass
+             
+             if all_vals:
+                 data["amount"] = max(all_vals)
+
+        # 4. Merchant Extraction
+        rec_match = re.search(r"RECEBEMOS\s*DE", text_flat)
+        if rec_match:
+             window = text_flat[rec_match.end() : rec_match.end() + 150]
+             # Splitting using common delimiters in DANFE header
+             clean = re.split(r"CNPJ|CPF|OS PRODUTOS|A QUANTIA|DATA", window)[0]
+             # Strip CNPJ patterns (embedded)
+             clean = re.sub(r'\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}', '', clean)
+             # Strip isolated numbers
+             clean = re.sub(r'[\d\.\/-]{10,}', '', clean)
+             clean = clean.strip(" -:.,")
+             if len(clean) > 3:
+                 data["merchant_or_bank"] = clean
+
+        # 5. Check Flags
+        if data["amount"] == 0.0 or not data["date"]:
+             if "CHECK DATA" not in data.get("merchant_or_bank", ""):
+                  data["merchant_or_bank"] = (data.get("merchant_or_bank") or "NF-E") + " (CHECK DATA)"
+
+        return data
+    except Exception as e:
+        print(f"DANFE Error: {e}")
+        return None
+
+def _parse_generic_receipt_fast_track(text: str) -> dict | None:
+    """Fallback para recibos via Janela de Proximidade."""
+    try:
+        text_flat = re.sub(r'[\s\n\r\t]+', ' ', text).upper()
+        data = {"doc_type": "RECEIPT"}
+        
+        # Data Window
+        m_lbl = re.search(r"DATA\s*(?:DO)?\s*(?:PAGAMENTO|EMISSAO)|EMISSAO", text_flat)
+        if m_lbl:
+             window = text_flat[m_lbl.end() : m_lbl.end() + 40]
+             m_dt = re.search(r"(\d{2}/\d{2}/\d{4})", window)
+             if m_dt:
+                 from datetime import datetime
+                 data["date"] = datetime.strptime(m_dt.group(1), "%d/%m/%Y").strftime("%Y-%m-%d")
+        
+        if not data.get("date"):
+             # Fallback global search
+             m = re.search(r"(\d{2}/\d{2}/\d{4})", text_flat)
+             if m:
+                 from datetime import datetime
+                 data["date"] = datetime.strptime(m.group(1), "%d/%m/%Y").strftime("%Y-%m-%d")
+
+        # Valor Window
+        val_patterns = [r"VALOR\s*TOTAL", r"TOTAL\s*PAGAR", r"TOTAL", r"VALOR"]
+        for vp in val_patterns:
+            m_lbl = re.search(vp, text_flat)
+            if m_lbl:
+                window = text_flat[m_lbl.end() : m_lbl.end() + 40]
+                m_val = re.search(r"([\d\.]+,\d{2})", window)
+                if m_val:
+                    data["amount"] = float(m_val.group(1).replace(".", "").replace(",", "."))
+                    break
+        
+        if not data.get("amount"):
+             # Fallback global search R$
+             m = re.search(r"R\$\s*([\d\.]+,\d{2})", text_flat)
+             if m:
+                 data["amount"] = float(m.group(1).replace(".", "").replace(",", "."))
+
+        data["merchant_or_bank"] = text_flat[:50].strip() if not data.get("merchant_or_bank") else data["merchant_or_bank"]
+
+        if data.get("date") and data.get("amount"):
+            return data
+    except: pass
+    return None
+    
 def extract_structured_data(state: ProcessingState) -> ProcessingState:
-    """Uses Strategy Pattern to structure data from raw content."""
+    """Orquestrador de extração com estratégias especializadas e bloqueio de LLM."""
     if state.get("error"):
         return state
     
@@ -284,33 +573,74 @@ def extract_structured_data(state: ProcessingState) -> ProcessingState:
         return {**state, "error": "No content to process."}
     
     raw_text = current_doc.raw_content
+    exp_type = state.get("expected_type")
+    
+    print(f"DEBUG: Processing with Strategy: {exp_type}")
+    
+    method = "UNKNOWN"
+    result = None
 
-    try:
-        # 1. Fast-Track: Try Regex Parser first
-        fast_track_result = _parse_itau_fast_track(raw_text)
-        
-        if fast_track_result:
-             print(f"FAST-TRACK: Successfully parsed Itaú Receipt via Regex.")
-             result = fast_track_result
+    if exp_type == "BANK_STATEMENT":
+        result = _extract_transactions_generic(raw_text)
+        if result: 
+            method = "STATEMENT_REGEX"
+            print(f"SUCCESS: Statement Parsed with {len(result['transactions'])} txns")
         else:
-             # 2. Slow-Track: Use Factory (LLM/Generic Parsers)
-             parser = ParserFactory.get_parser(raw_text)
-             result = parser.extract(raw_text)
+            return {**state, "error": f"Failed to parse bank statement table. Content: {raw_text[:50]}..."}
+            
+    elif exp_type == "RECEIPT":
+        # Chain
+        result = _parse_itau_fast_track(raw_text)
+        if result: method = "RECEIPT_ITAU"
         
-        # Merge result
-        updated_doc = FinancialDocument(
-            file_name=current_doc.file_name,
-            doc_type=result.get("doc_type", "UNKNOWN"),
-            date=result.get("date"),
-            amount=result.get("amount"),
-            merchant_or_bank=result.get("merchant_or_bank"),
-            raw_content=current_doc.raw_content,
-            transactions=result.get("transactions")
-        )
+        if not result:
+            result = _parse_danfe_fast_track(raw_text)
+            if result: method = "RECEIPT_DANFE"
+            
+        if not result:
+            result = _parse_generic_receipt_fast_track(raw_text)
+            if result: method = "RECEIPT_GENERIC"
         
-        return {**state, "extracted_data": updated_doc}
-    except Exception as e:
-        return {**state, "error": f"Data extraction failed: {str(e)}"}
+        if not result:
+            return {**state, "error": f"Failed to parse receipt (Fast Track). Content: {raw_text[:50]}..."}
+    
+    else:
+        # Auto-Detect Logic
+        # 1. Try Strict Receipt Parsers first
+        result = _parse_itau_fast_track(raw_text) or _parse_danfe_fast_track(raw_text)
+        if result:
+             method = "AUTO_DETECT_RECEIPT_STRICT"
+        
+        if not result:
+             # 2. Heuristic: Is it a statement?
+             # Count DD/MM Patterns
+             date_count = len(re.findall(r"\d{2}/\d{2}", raw_text))
+             if date_count > 2:
+                 result = _extract_transactions_generic(raw_text)
+                 if result: method = "AUTO_DETECT_STATEMENT"
+        
+        if not result:
+             # 3. Try Generic Receipt Fallback
+             result = _parse_generic_receipt_fast_track(raw_text)
+             if result: method = "AUTO_DETECT_RECEIPT_GENERIC"
+             
+        if not result:
+             return {**state, "error": f"Layout não suportado (IA bloqueada na ingestão). Content: {raw_text[:50]}..."}
+    
+    if not result:
+         return {**state, "error": "Extraction returned empty result."}
+
+    updated_doc = FinancialDocument(
+        file_name=current_doc.file_name,
+        doc_type=result.get("doc_type", "UNKNOWN"),
+        date=result.get("date"),
+        amount=result.get("amount"),
+        merchant_or_bank=result.get("merchant_or_bank"),
+        raw_content=current_doc.raw_content,
+        transactions=result.get("transactions")
+    )
+    
+    return {**state, "extracted_data": updated_doc, "ingestion_method": method}
 
 # --- Routing Logic ---
 
@@ -373,7 +703,7 @@ workflow.add_conditional_edges(
 workflow.add_edge("extract_structured_data", END)
 
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 from sqlalchemy import select
 from app.db.session import AsyncSessionLocal
 from app.db.models import FinancialDocument as DBFinancialDocument, Transaction as DBTransaction
@@ -404,6 +734,9 @@ async def process_document(file_path: str, password: str = None, file_hash: str 
         file_path=file_path,
         password=password,
         file_extension="",
+        expected_type=expected_type,
+        ingestion_method=None,
+        ingestion_logs=None,
         extracted_data=None,
         error=None
     )
@@ -443,7 +776,14 @@ async def process_document(file_path: str, password: str = None, file_hash: str 
                 db_doc.status = "ERROR"
                 db_doc.raw_text = error
             elif extracted:
-                db_doc.status = "PROCESSED"
+                # Determine Status based on Quality
+                doc_status = "PROCESSED"
+                if getattr(extracted, "amount", 0.0) == 0.0 and getattr(extracted, "date", None) is None:
+                    # STRICT: Only flag if BOTH signals failed.
+                    doc_status = "REQUIRES_REVIEW"
+                
+                db_doc.status = doc_status
+
                 if not expected_type:
                     db_doc.doc_type = extracted.doc_type
                 else:
@@ -452,7 +792,10 @@ async def process_document(file_path: str, password: str = None, file_hash: str 
                      pass 
                 
                 db_doc.raw_text = extracted.raw_content
-                # db_doc.metadata_blob = extracted.metadata # Removed if not matching model, check model first
+                
+                # Telemetry
+                db_doc.ingestion_method = result.get("ingestion_method")
+                db_doc.ingestion_logs = result.get("ingestion_logs")
                 
                 # Save Transactions
                 if extracted.transactions:
@@ -503,7 +846,13 @@ async def process_document(file_path: str, password: str = None, file_hash: str 
                          t_amount = extracted.amount
                          t_desc = extracted.merchant_or_bank or "Receipt"
                          
-                         txn_date_obj = datetime.strptime(t_date, "%Y-%m-%d").date() if t_date else datetime.utcnow().date()
+                         txn_date_obj = None
+                         if t_date:
+                             if isinstance(t_date, (datetime, date)):
+                                 txn_date_obj = t_date if isinstance(t_date, date) else t_date.date()
+                             else:
+                                 try: txn_date_obj = datetime.strptime(str(t_date), "%Y-%m-%d").date()
+                                 except: pass
                          
                          new_txn = DBTransaction(
                                 document_id=db_doc.id,

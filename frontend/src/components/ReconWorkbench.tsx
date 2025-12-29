@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useDropzone } from 'react-dropzone';
 import {
@@ -8,11 +8,15 @@ import {
     deleteDocument,
     resetWorkspace,
     uploadDocument,
+    uploadStatement,
+    uploadReceipt,
     manualMatch,
-    analyzeTax
+    analyzeTax,
+    analyzeBatch,
+    updateDocument,
 } from '../lib/api';
 import type { Transaction, FinancialDocument, ReconciliationStats } from '../lib/api';
-import { RefreshCw, CheckCircle, FileText, Link as LinkIcon, Trash2, Upload, Loader2, AlertCircle, AlertTriangle, Scale } from 'lucide-react';
+import { RefreshCw, CheckCircle, FileText, Link as LinkIcon, Trash2, Upload, Loader2, AlertCircle, AlertTriangle, Scale, ArrowUpDown, Edit3, Save, X, Sparkles } from 'lucide-react';
 import { TaxAnalysisPanel } from './TaxAnalysisPanel';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -25,9 +29,13 @@ function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs));
 }
 
-const formatDate = (dateString: string) => {
+const formatDate = (dateString: string | null | undefined) => {
     if (!dateString) return '-';
-    return new Date(dateString).toLocaleDateString('pt-BR');
+    // Handle YYYY-MM-DD for consistency
+    const parts = dateString.split('T')[0].split('-');
+    if (parts.length !== 3) return dateString;
+    const [y, m, d] = parts;
+    return `${d}/${m}/${y}`;
 };
 
 const formatCurrency = (amount: number) => {
@@ -40,14 +48,23 @@ interface DraggableReceiptProps {
     doc: FinancialDocument;
     isLinked: boolean;
     onDelete: (id: string) => void;
+    onUpdate?: (id: string, data: { date?: string; amount?: number }) => Promise<void>;
 }
 
-const DraggableReceipt: React.FC<DraggableReceiptProps> = ({ doc, isLinked, onDelete }) => {
+const DraggableReceipt: React.FC<DraggableReceiptProps> = ({ doc, isLinked, onDelete, onUpdate }) => {
     const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
         id: doc.id,
         data: doc,
         disabled: isLinked
     });
+
+    // Edit State
+    const [isEditing, setIsEditing] = useState(false);
+    const receiptTx = doc.transactions?.[0];
+    const [editAmount, setEditAmount] = useState(receiptTx?.amount?.toString() || '');
+    const [editDate, setEditDate] = useState(receiptTx?.date || ''); // YYYY-MM-DD
+
+
 
     const style = {
         transform: CSS.Translate.toString(transform),
@@ -55,7 +72,93 @@ const DraggableReceipt: React.FC<DraggableReceiptProps> = ({ doc, isLinked, onDe
         opacity: isDragging ? 0.5 : 1
     };
 
-    const receiptTx = doc.transactions?.[0];
+    // "Requires Review" if missing critical data
+    const requiresReview = !receiptTx || receiptTx.amount === undefined || !receiptTx.date;
+
+    const handleSave = async (e: React.MouseEvent | React.KeyboardEvent) => {
+        e.stopPropagation();
+        if (!onUpdate) return;
+
+        try {
+            // Normalize amount: "1.234,56" -> 1234.56, "1234.56" -> 1234.56
+            let cleanAmountStr = editAmount.replace('R$', '').trim();
+            if (cleanAmountStr.includes(',') && cleanAmountStr.includes('.')) {
+                // Assume "1.234,56" format (PT-BR)
+                cleanAmountStr = cleanAmountStr.replace(/\./g, '').replace(',', '.');
+            } else if (cleanAmountStr.includes(',')) {
+                // Assume "1234,56" format
+                cleanAmountStr = cleanAmountStr.replace(',', '.');
+            }
+            // else assume dot decimal or integer
+
+            const amount = cleanAmountStr ? parseFloat(cleanAmountStr) : undefined;
+            if (amount !== undefined && isNaN(amount)) {
+                toast.error("Invalid Amount");
+                return;
+            }
+
+            await onUpdate(doc.id, {
+                date: editDate || undefined,
+                amount
+            });
+            // Success Handling is managed by parent to allow notifications
+            setIsEditing(false);
+        } catch (err) {
+            // Error handling can remain here or move up
+        }
+    };
+
+    if (isEditing) {
+        return (
+            <div
+                ref={setNodeRef}
+                style={style}
+                className={cn(
+                    "p-4 bg-white dark:bg-slate-900 border border-blue-500 rounded-lg shadow-sm"
+                )}
+            >
+                <div className="flex flex-col gap-3">
+                    <div className="flex flex-col gap-1 border-b border-slate-100 dark:border-slate-800 pb-2 mb-1">
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-blue-600 uppercase tracking-wider truncate max-w-[180px]">
+                                Editing: {doc.original_filename || doc.filename}
+                            </span>
+                            <div className="flex gap-1">
+                                <button onClick={handleSave} className="p-1 text-green-600 hover:bg-green-50 rounded" title="Save"><Save className="w-4 h-4" /></button>
+                                <button onClick={() => setIsEditing(false)} className="p-1 text-slate-400 hover:bg-slate-100 rounded" title="Cancel"><X className="w-4 h-4" /></button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="block text-xs text-slate-500 mb-1">Date</label>
+                        <input
+                            type="date"
+                            value={editDate}
+                            onChange={(e) => setEditDate(e.target.value)}
+                            className="w-full text-sm p-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent"
+                            onKeyDown={(e) => { if (e.key === 'Enter') handleSave(e); }}
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-xs text-slate-500 mb-1">Amount</label>
+                        <input
+                            type="text"
+                            step="0.01"
+                            value={editAmount}
+                            onChange={(e) => setEditAmount(e.target.value)}
+                            className="w-full text-sm p-1.5 rounded border border-slate-300 dark:border-slate-700 bg-transparent"
+                            placeholder="0,00"
+                            onKeyDown={(e) => { if (e.key === 'Enter') handleSave(e); }}
+                        />
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    // Priority: Locked (Linked) > Warning (Review) > Normal
+    const isActuallyLinked = isLinked || !!doc.linked_transaction_id;
 
     return (
         <div
@@ -64,50 +167,85 @@ const DraggableReceipt: React.FC<DraggableReceiptProps> = ({ doc, isLinked, onDe
             {...listeners}
             {...attributes}
             className={cn(
-                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group cursor-grab active:cursor-grabbing",
-                isLinked && "opacity-75 cursor-default"
+                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group cursor-grab active:cursor-grabbing relative flex flex-col justify-between min-h-[150px]",
+                isActuallyLinked && "opacity-75 cursor-default",
+                requiresReview && !isActuallyLinked && "border-l-4 border-amber-500 bg-amber-50/50 dark:bg-amber-900/10",
+                !requiresReview && !isActuallyLinked && "bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800"
             )}
         >
-            <div className="flex items-start gap-3">
-                <div className="p-2 bg-purple-50 dark:bg-purple-900/20 rounded-lg text-purple-600 dark:text-purple-400">
-                    <FileText className="w-5 h-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                    <div className="flex justify-between items-start">
-                        <p className="font-medium text-slate-900 dark:text-slate-100 truncate pr-2" title={doc.original_filename || doc.filename}>
-                            {doc.original_filename || doc.filename}
-                        </p>
-                        <div className="flex items-center gap-2">
-                            {isLinked && (
-                                <span className="flex-shrink-0 inline-flex items-center rounded-md bg-purple-50 px-2 py-1 text-xs font-medium text-purple-700 ring-1 ring-inset ring-purple-700/10 dark:bg-purple-400/10 dark:text-purple-400 dark:ring-purple-400/30">
-                                    Linked
-                                </span>
-                            )}
-                            <button
-                                onPointerDown={(e) => e.stopPropagation()} // Prevent drag start match on delete
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (confirm('Delete this document?')) onDelete(doc.id);
-                                }}
-                                className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-slate-400 hover:text-red-500 rounded"
-                                title="Delete"
-                            >
-                                <Trash2 className="w-4 h-4" />
-                            </button>
-                        </div>
+            {/* Top Section: Merchant/Filename & Amount */}
+            <div className="flex items-start justify-between gap-3 w-full">
+                <div className="flex items-start gap-3 min-w-0">
+                    <div className={cn(
+                        "p-2 rounded-lg flex-shrink-0",
+                        isActuallyLinked
+                            ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40 dark:text-emerald-500"
+                            : requiresReview
+                                ? "bg-amber-100 text-amber-600 dark:bg-amber-900/40 dark:text-amber-500"
+                                : "bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400"
+                    )}>
+                        {isActuallyLinked ? <LinkIcon className="w-5 h-5" /> : requiresReview ? <AlertTriangle className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
                     </div>
+                    <p className="font-medium text-slate-900 dark:text-slate-100 line-clamp-2 max-w-[140px] sm:max-w-[180px]" title={doc.original_filename || doc.filename}>
+                        {doc.original_filename || doc.filename}
+                    </p>
+                </div>
 
-                    <div className="mt-1 flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">
-                        {receiptTx ? (
-                            <>
-                                <span>{formatDate(receiptTx.date)}</span>
-                                <span className="text-slate-300 dark:text-slate-700">•</span>
-                                <span className="font-mono">{formatCurrency(receiptTx.amount)}</span>
-                            </>
-                        ) : (
-                            <span className="italic opacity-70">No specific data extracted</span>
+                {receiptTx ? (
+                    <span className="font-mono font-semibold text-slate-700 dark:text-slate-300 ml-2 whitespace-nowrap">
+                        {formatCurrency(receiptTx.amount)}
+                    </span>
+                ) : (
+                    <span className="text-amber-600 dark:text-amber-500 text-xs font-medium whitespace-nowrap">--</span>
+                )}
+            </div>
+
+            {/* Bottom Section: Date, Badges, Actions */}
+            <div className="flex items-end justify-between w-full">
+                <div className="flex flex-col gap-2">
+                    <span className="text-sm text-slate-500 dark:text-slate-400">
+                        {receiptTx ? formatDate(receiptTx.date) : "No Date"}
+                    </span>
+
+                    <div className="flex items-center gap-2">
+                        {isActuallyLinked && (
+                            <span className="flex-shrink-0 inline-flex items-center rounded-md bg-emerald-500 px-2 py-1 text-xs font-medium text-white shadow-sm">
+                                Linked
+                            </span>
+                        )}
+                        {requiresReview && !isActuallyLinked && (
+                            <span className="flex-shrink-0 inline-flex items-center rounded-md bg-amber-100 px-2 py-1 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                                Requires Review
+                            </span>
                         )}
                     </div>
+                </div>
+
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {!isActuallyLinked && (
+                        <button
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setIsEditing(true);
+                            }}
+                            className="p-1.5 text-slate-400 hover:text-blue-600 rounded bg-white dark:bg-slate-800 shadow-sm border border-slate-200 dark:border-slate-700"
+                            title="Edit Value"
+                        >
+                            <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                    )}
+                    <button
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (confirm('Delete this document?')) onDelete(doc.id);
+                        }}
+                        className="p-1.5 text-slate-400 hover:text-red-500 rounded bg-white dark:bg-slate-800 shadow-sm border border-slate-200 dark:border-slate-700"
+                        title="Delete"
+                    >
+                        <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                 </div>
             </div>
         </div>
@@ -118,9 +256,10 @@ interface DroppableTransactionProps {
     transaction: Transaction;
     isMatched: boolean;
     linkedDoc: FinancialDocument | undefined;
+    onAnalyze: (id: string) => void;
 }
 
-const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction: tx, isMatched, linkedDoc }) => {
+const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction: tx, isMatched, linkedDoc, onAnalyze }) => {
     const { setNodeRef, isOver } = useDroppable({
         id: tx.id,
         disabled: isMatched
@@ -129,63 +268,124 @@ const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction
 
     // Classification Colors
     const getTaxStatusColor = () => {
-        if (!tx.tax_analysis) return "text-slate-400 bg-slate-100 dark:bg-slate-800 dark:text-slate-500 hover:text-blue-600 hover:bg-blue-50";
+        if (!tx.tax_analysis) return "text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm border-transparent";
         const cls = tx.tax_analysis.classification.toLowerCase();
-        if (cls.includes('dedutível') && !cls.includes('não')) return "text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 dark:text-emerald-400";
-        if (cls.includes('parcial')) return "text-yellow-600 bg-yellow-50 dark:bg-yellow-900/20 dark:text-yellow-400";
-        return "text-slate-500 bg-slate-100 dark:bg-slate-800 dark:text-slate-400";
+        if (cls.includes('dedutível') && !cls.includes('não')) return "text-emerald-700 bg-emerald-50 border-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300 dark:border-emerald-800";
+        if (cls.includes('parcial')) return "text-yellow-700 bg-yellow-50 border-yellow-200 dark:bg-yellow-900/40 dark:text-yellow-300 dark:border-yellow-800";
+        return "text-slate-600 bg-slate-100 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700";
     };
 
     return (
         <li
             ref={setNodeRef}
             className={cn(
-                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group border-l-4 flex flex-col gap-3",
+                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group border-l-4 flex flex-col justify-between min-h-[150px] gap-3",
                 isMatched
                     ? "bg-emerald-50/30 dark:bg-emerald-900/10 border-emerald-500"
                     : "border-transparent bg-white dark:bg-slate-900",
                 isOver && !isMatched && "bg-blue-50 dark:bg-blue-900/20 border-blue-500 ring-1 ring-inset ring-blue-500/20"
             )}
         >
-            <div className="flex justify-between items-start">
-                <div className="flex-1 min-w-0">
-                    <div className="flex justify-between items-start mb-1">
-                        <span className="font-medium text-slate-900 dark:text-slate-100 line-clamp-1" title={tx.merchant_name}>
-                            {tx.merchant_name}
-                        </span>
-                        <span className={cn(
-                            "font-mono font-semibold ml-2",
-                            tx.amount < 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
-                        )}>
-                            {formatCurrency(tx.amount)}
-                        </span>
-                    </div>
-                    <div className="flex justify-between items-center text-sm text-slate-500 dark:text-slate-400">
-                        <span>{formatDate(tx.date)}</span>
+            <div className="flex flex-col justify-between h-full bg-transparent">
+                {/* Top Section: Merchant Name & Amount */}
+                <div className="flex justify-between items-start w-full">
+                    <span className="font-medium text-slate-900 dark:text-slate-100 line-clamp-2 pr-2 leading-tight" title={tx.merchant_name}>
+                        {tx.merchant_name}
+                    </span>
+                    <span className="font-mono font-semibold text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                        {formatCurrency(tx.amount)}
+                    </span>
+                </div>
 
-                        <div className="flex items-center gap-2">
-                            {isMatched && (
-                                <button
-                                    onClick={() => setShowTax(!showTax)}
-                                    className={cn("p-1.5 rounded-md transition-colors flex items-center gap-1.5 text-xs font-medium border border-transparent", getTaxStatusColor(), showTax && "ring-2 ring-blue-500/20")}
-                                    title="Tax Analysis"
-                                >
-                                    <Scale className="w-3.5 h-3.5" />
-                                    {tx.tax_analysis?.classification || "Analyze"}
-                                </button>
-                            )}
-
+                {/* Bottom Section: Date, Actions, Badges */}
+                <div className="flex items-end justify-between w-full">
+                    <div className="flex flex-col gap-2">
+                        <span className="text-sm text-slate-500 dark:text-slate-400">{formatDate(tx.date)}</span>
+                        <div className="flex items-center gap-2 flex-wrap">
                             {isMatched ? (
                                 <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800">
                                     <LinkIcon className="w-3 h-3" />
-                                    {linkedDoc ? `Linked: ${linkedDoc.original_filename || linkedDoc.filename}` : `Matched (${(tx.match_score! * 100).toFixed(0)}%)`}
+                                    {linkedDoc ? `Linked` : `Matched (${(tx.match_score! * 100).toFixed(0)}%)`}
                                 </div>
                             ) : (
-                                <span className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">
+                                <span className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full text-slate-500">
                                     Unlinked
                                 </span>
                             )}
                         </div>
+                    </div>
+
+                    <div className="flex items-center relative group/tooltip">
+                        {isMatched && (
+                            <>
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (tx.tax_analysis) {
+                                            setShowTax(!showTax);
+                                        } else {
+                                            onAnalyze(tx.id);
+                                        }
+                                    }}
+                                    className={cn("px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5 text-xs font-semibold border shadow-sm", getTaxStatusColor(), showTax && "ring-2 ring-offset-1 ring-blue-500/20")}
+                                >
+                                    {tx.tax_analysis ? (
+                                        <>
+                                            {tx.tax_analysis.classification.toLowerCase().includes('dedutível') && !tx.tax_analysis.classification.toLowerCase().includes('não')
+                                                ? <Sparkles className="w-3.5 h-3.5" />
+                                                : <Scale className="w-3.5 h-3.5" />
+                                            }
+                                            {tx.tax_analysis.classification}
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Sparkles className="w-3.5 h-3.5" />
+                                            Analyze
+                                        </>
+                                    )}
+                                </button>
+
+                                {/* Rich Hover Card for Analysis Results */}
+                                {tx.tax_analysis && (
+                                    <div className="absolute bottom-full mb-2 right-0 w-72 bg-white dark:bg-slate-950 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 p-4 opacity-0 group-hover/tooltip:opacity-100 transition-opacity pointer-events-none z-50 text-left">
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <div className={cn(
+                                                "w-2 h-2 rounded-full",
+                                                tx.tax_analysis.classification.toLowerCase().includes('dedutível') && !tx.tax_analysis.classification.toLowerCase().includes('não')
+                                                    ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                                                    : "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                                            )} />
+                                            <span className="font-bold text-slate-800 dark:text-slate-100 text-sm">
+                                                {tx.tax_analysis.classification}
+                                            </span>
+                                        </div>
+
+                                        <div className="space-y-2">
+                                            <div className="text-xs">
+                                                <span className="text-slate-500 dark:text-slate-400 font-medium">Category:</span>
+                                                <span className="ml-1 text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                                                    {tx.tax_analysis.category || "General"}
+                                                </span>
+                                            </div>
+
+                                            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed border-l-2 border-slate-200 dark:border-slate-700 pl-2">
+                                                {tx.tax_analysis.justification_text || tx.tax_analysis.raw_analysis?.comentario || "No rationale provided."}
+                                            </p>
+
+                                            <div className="pt-2 mt-2 border-t border-slate-100 dark:border-slate-800 flex justify-between items-center">
+                                                <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Estimated Cost</span>
+                                                <span className="font-mono text-sm font-bold text-slate-900 dark:text-slate-100">
+                                                    {formatCurrency(tx.amount)}
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        {/* Arrow */}
+                                        <div className="absolute -bottom-1.5 right-6 w-3 h-3 bg-white dark:bg-slate-950 border-r border-b border-slate-200 dark:border-slate-800 rotate-45"></div>
+                                    </div>
+                                )}
+                            </>
+                        )}
                     </div>
                 </div>
             </div>
@@ -223,7 +423,14 @@ const CompactDropzone: React.FC<CompactDropzoneProps> = ({ label, docType, onUpl
         setUploading(true);
 
         const processFile = async (file: File, pwd?: string) => {
-            const result = await uploadDocument(file, docType, pwd);
+            let result;
+            if (docType === 'BANK_STATEMENT') {
+                result = await uploadStatement(file, pwd);
+            } else if (docType === 'RECEIPT') {
+                result = await uploadReceipt(file, pwd);
+            } else {
+                result = await uploadDocument(file, docType, pwd);
+            }
 
             if (result.status === 'partial_success') {
                 toast.warning(`Uploaded ${file.name}`, {
@@ -285,6 +492,10 @@ const CompactDropzone: React.FC<CompactDropzoneProps> = ({ label, docType, onUpl
                         const timeoutMsg = "Upload timed out. The file might be too large or the server is busy.";
                         toast.error("Upload Failed", { description: timeoutMsg });
                         setError(timeoutMsg);
+                    } else if (err.response?.status === 500) {
+                        const serverError = "Server encountered an error. Please try again or check the file.";
+                        toast.error("Upload Failed", { description: serverError });
+                        setError(serverError);
                     } else {
                         toast.error("Upload Failed", { description: msg });
                         setError(msg);
@@ -355,6 +566,10 @@ export const ReconWorkbench: React.FC = () => {
     const [filter, setFilter] = useState<'ALL' | 'MATCHED' | 'UNLINKED'>('ALL');
     const [activeDoc, setActiveDoc] = useState<FinancialDocument | null>(null);
 
+    // Sorting State
+    const [sortBank, setSortBank] = useState<'ASC' | 'DESC' | null>(null);
+    const [sortReceipts, setSortReceipts] = useState<'ASC' | 'DESC' | null>(null);
+
     // Conflict Modal State
     const [conflictModalOpen, setConflictModalOpen] = useState(false);
     const [pendingMatch, setPendingMatch] = useState<{ txnId: string, receiptId: string, message: string } | null>(null);
@@ -364,8 +579,6 @@ export const ReconWorkbench: React.FC = () => {
         queryKey: ['transactions', 'BANK_STATEMENT'],
         queryFn: () => getTransactions(false, 'BANK_STATEMENT'),
     });
-
-
 
     // Fetch Documents (Receipts) - Explicit Type
     const { data: documents, isLoading: loadingDocs, isError: errorDocs } = useQuery<FinancialDocument[]>({
@@ -403,15 +616,73 @@ export const ReconWorkbench: React.FC = () => {
         }
     });
 
-    // Filtering Logic: The API now filters, so we just fallback to empty array if loading
-    const bankTransactions = transactions || [];
-    const receiptDocuments = documents || [];
+    const analyzeMutation = useMutation({
+        mutationFn: () => analyzeBatch(1),
+        onSuccess: () => {
+            toast.success("Analysis Triggered");
+            queryClient.invalidateQueries({ queryKey: ['transactions'] });
+        },
+        onError: (err) => {
+            toast.error("Analysis Failed", { description: err.message });
+        }
+    });
 
-    // Refresh function for uploads
+    // Sorting & Filtering Logic
+    // Sorting & Filtering Logic (Memoized)
+    const filteredTransactions = useMemo(() => {
+        let items = transactions || [];
+        if (filter === 'MATCHED') items = items.filter(tx => tx.receipt_id != null);
+        if (filter === 'UNLINKED') items = items.filter(tx => tx.receipt_id == null);
+
+        if (sortBank) {
+            return [...items].sort((a, b) => {
+                const valA = Math.abs(a.amount);
+                const valB = Math.abs(b.amount);
+                if (valA === valB) return 0;
+                return sortBank === 'ASC' ? valA - valB : valB - valA;
+            });
+        }
+        return items;
+    }, [transactions, filter, sortBank]);
+
+    const filteredDocuments = useMemo(() => {
+        let items = documents || [];
+        // Filtering now also respects linked_transaction_id from backend
+        if (filter === 'MATCHED') items = items.filter(d => d.linked_transaction_id != null);
+        // "Unlinked" means no helper field
+        if (filter === 'UNLINKED') items = items.filter(d => d.linked_transaction_id == null);
+
+        if (sortReceipts) {
+            return [...items].sort((a, b) => {
+                const valA = Math.abs(a.transactions?.[0]?.amount || 0);
+                const valB = Math.abs(b.transactions?.[0]?.amount || 0);
+                if (valA === valB) return 0;
+                return sortReceipts === 'ASC' ? valA - valB : valB - valA;
+            });
+        }
+        return items;
+    }, [documents, filter, sortReceipts]);
+
+    const bankTransactions = filteredTransactions;
+    const receiptDocuments = filteredDocuments;
+
     // Refresh function for uploads
     const refreshData = () => {
         queryClient.invalidateQueries({ queryKey: ['documents'] });
         queryClient.invalidateQueries({ queryKey: ['transactions'] });
+        if (filter === 'MATCHED') setFilter('ALL');
+    };
+
+    const toggleSortBank = () => {
+        if (sortBank === null) setSortBank('DESC');
+        else if (sortBank === 'DESC') setSortBank('ASC');
+        else setSortBank(null);
+    };
+
+    const toggleSortReceipts = () => {
+        if (sortReceipts === null) setSortReceipts('DESC');
+        else if (sortReceipts === 'DESC') setSortReceipts('ASC');
+        else setSortReceipts(null);
     };
 
     // Manual Match Logic
@@ -423,24 +694,36 @@ export const ReconWorkbench: React.FC = () => {
         const { active, over } = event;
         setActiveDoc(null);
 
+        // Debug IDs to ensure correct mapping
+        console.log("DragEnd IDs:", { activeId: active.id, overId: over?.id });
+
         if (!over) return;
 
-        const receiptId = active.id as string;
-        const txnId = over.id as string;
+        const receiptId = String(active.id);
+        const txnId = String(over.id);
 
         try {
             await manualMatch(txnId, receiptId, false);
             toast.success("Match Confirmed");
+
+            // Invalidate queries to refresh UI state (badges, +/- signs)
+            queryClient.invalidateQueries({ queryKey: ['transactions'] });
+            queryClient.invalidateQueries({ queryKey: ['documents'] });
+
             // Trigger Tax Analysis in background
             analyzeTax(txnId).then(() => {
                 toast.success("Tax Analysis Complete");
                 queryClient.invalidateQueries({ queryKey: ['transactions'] });
             }).catch(e => console.error("Tax Analysis Trigger Failed", e));
 
-            queryClient.invalidateQueries({ queryKey: ['transactions'] });
-            queryClient.invalidateQueries({ queryKey: ['documents'] });
         } catch (err: any) {
-            if (err.response?.status === 409) {
+            console.error("Match Error:", err);
+
+            if (err.response?.status === 404) {
+                toast.error("Sync Error", {
+                    description: "Please refresh the page to update document IDs."
+                });
+            } else if (err.response?.status === 409) {
                 const msg = err.response.data.detail?.replace("Discrepancy Detected:", "").trim();
                 setPendingMatch({
                     txnId,
@@ -472,6 +755,36 @@ export const ReconWorkbench: React.FC = () => {
             setPendingMatch(null);
         } catch (err: any) {
             toast.error("Force Match Failed", { description: err.message });
+        }
+    };
+
+    // Handle inline updates
+    const handleUpdateDocument = async (id: string, data: { date?: string; amount?: number }) => {
+        try {
+            await updateDocument(id, data);
+            queryClient.invalidateQueries({ queryKey: ['documents'] });
+
+            // Check for potential matches locally
+            if (data.amount !== undefined) {
+                const amount = Math.abs(data.amount);
+                const potentialMatch = bankTransactions.find(tx =>
+                    !tx.receipt_id && Math.abs(tx.amount) === amount
+                );
+
+                if (potentialMatch) {
+                    toast.success("Document Updated", {
+                        description: "Potential match found! Run Auto-Reconcile to link.",
+                        action: {
+                            label: "Run Auto-Recon",
+                            onClick: () => mutation.mutate()
+                        }
+                    });
+                    return;
+                }
+            }
+            toast.success("Document Updated");
+        } catch (error) {
+            toast.error("Failed to update document");
         }
     };
 
@@ -542,6 +855,16 @@ export const ReconWorkbench: React.FC = () => {
                             </h3>
 
                             <div className="flex items-center gap-2">
+                                <button
+                                    onClick={toggleSortBank}
+                                    className={cn(
+                                        "p-1.5 rounded-md text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors",
+                                        sortBank && "text-blue-600 bg-blue-50 dark:bg-blue-900/10"
+                                    )}
+                                    title="Sort by Amount"
+                                >
+                                    <ArrowUpDown className="w-4 h-4" />
+                                </button>
                                 <select
                                     value={filter}
                                     onChange={(e) => setFilter(e.target.value as any)}
@@ -574,27 +897,22 @@ export const ReconWorkbench: React.FC = () => {
                             ) : (
                                 <div className="overflow-y-auto flex-1">
                                     <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-                                        {bankTransactions
-                                            .filter(tx => {
-                                                if (filter === 'MATCHED') return tx.receipt_id;
-                                                if (filter === 'UNLINKED') return !tx.receipt_id;
-                                                return true;
-                                            })
-                                            .map((tx: Transaction) => {
-                                                const isMatched = !!tx.receipt_id;
-                                                const linkedDoc = isMatched && tx.receipt_id
-                                                    ? documents?.find(d => d.id === tx.receipt_id)
-                                                    : undefined;
+                                        {bankTransactions.map((tx: Transaction) => {
+                                            const isMatched = !!tx.receipt_id;
+                                            const linkedDoc = isMatched && tx.receipt_id
+                                                ? documents?.find(d => d.id === tx.receipt_id)
+                                                : undefined;
 
-                                                return (
-                                                    <DroppableTransaction
-                                                        key={tx.id}
-                                                        transaction={tx}
-                                                        isMatched={isMatched}
-                                                        linkedDoc={linkedDoc}
-                                                    />
-                                                );
-                                            })}
+                                            return (
+                                                <DroppableTransaction
+                                                    key={tx.id}
+                                                    transaction={tx}
+                                                    isMatched={isMatched}
+                                                    linkedDoc={linkedDoc}
+                                                    onAnalyze={() => analyzeMutation.mutate()}
+                                                />
+                                            );
+                                        })}
                                     </ul>
                                 </div>
                             )}
@@ -611,6 +929,16 @@ export const ReconWorkbench: React.FC = () => {
                                     {receiptDocuments.length} files
                                 </span>
                             </h3>
+                            <button
+                                onClick={toggleSortReceipts}
+                                className={cn(
+                                    "p-1.5 rounded-md text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors",
+                                    sortReceipts && "text-purple-600 bg-purple-50 dark:bg-purple-900/10"
+                                )}
+                                title="Sort by Amount"
+                            >
+                                <ArrowUpDown className="w-4 h-4" />
+                            </button>
                         </div>
 
                         {/* Zone B: Receipts Upload */}
@@ -634,13 +962,14 @@ export const ReconWorkbench: React.FC = () => {
                                 <div className="overflow-y-auto flex-1 p-2 space-y-2">
                                     {receiptDocuments.map((doc: FinancialDocument) => {
                                         // Strict Linked Logic
-                                        const isLinked = bankTransactions.some(bt => bt.receipt_id === doc.id);
+                                        const isLinked = !!doc.linked_transaction_id;
                                         return (
                                             <DraggableReceipt
                                                 key={doc.id}
                                                 doc={doc}
                                                 isLinked={isLinked}
                                                 onDelete={(id) => deleteMutation.mutate(id)}
+                                                onUpdate={handleUpdateDocument}
                                             />
                                         );
                                     })}
