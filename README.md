@@ -40,6 +40,10 @@ O **Finance Recon AI** é uma solução de engenharia de dados financeiros proje
 - [ ] **UI Batch Progress:** Visualização de progresso em tempo real durante o processamento em lote.
 - [ ] **Daily Rate Fetcher:** Atualização automática da taxa USD/BRL via API financeira.
 - [ ] **Multi-User Tenant:** Separação lógica de dados por consultório/profissional.
+- [ ] **Dynamic Batch Scaling:** Refatorar o endpoint analyze-batch para aceitar um parâmetro all_pending: bool ou calcular automaticamente o limite com base na cota restante retornada pelo /quota-status.
+- [ ] **Account Plan Keywords:** Expandir a lista de palavras-chave no backend (ex: adicionar "neodent", "straumann") para que o código P10.01.00005 seja aplicado automaticamente mesmo se a IA classificar como "Material de Consumo" genérico.
+- [ ] **Progressive Batching:** Implementar um loop no Frontend que chame o endpoint /analyze-batch sucessivamente até que não restem transações pendentes, respeitando os 13s de intervalo de forma transparente para o usuário.
+- [ ] **Quota Management:** Implementar um sistema de gerenciamento de cotas que permita visualizar o uso da cota atual e o limite máximo, e que permita reabrir a cota se necessário.
 
 ---
 *Desenvolvido com foco em Clean Code, Performance e Rigor Contábil.*

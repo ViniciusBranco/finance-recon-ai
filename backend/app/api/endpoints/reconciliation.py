@@ -389,6 +389,7 @@ async def manual_match_transaction(
     txn.match_score = 1.0
     txn.match_type = "MANUAL"
     
+    # NOTE: We intentionally do NOT trigger tax analysis here. It must be a separate user action.
     await db.commit()
     return {"message": "Match confirmed"}
 

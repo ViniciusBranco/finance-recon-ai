@@ -67,6 +67,20 @@ class ReconciliationEngine:
                 if final_score > highest_score and final_score > 0.6:
                     highest_score = final_score
                     best_match = receipt_txn
+
+            # AMBIGUITY CHECK:
+            # If we found a match, check if there are other candidates with crucial similarities that make this risky.
+            if best_match:
+                # Count exact duplicates (same amount + same date) in the receipts list
+                # This prevents auto-linking when user has two identical receipts (e.g. 2x R$100 on same day)
+                ambiguous_count = 0
+                for r in receipt_transactions:
+                     if r.amount == best_match.amount and r.date == best_match.date:
+                         ambiguous_count += 1
+                
+                if ambiguous_count > 1:
+                    # Too risky. Let user decide manually.
+                    best_match = None
             
             # 3. Apply Best Match
             if best_match:

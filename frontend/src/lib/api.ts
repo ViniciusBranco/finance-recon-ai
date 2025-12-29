@@ -161,8 +161,16 @@ export const manualMatch = async (transactionId: string, receiptId: string, forc
     await apiClient.post(`/recon/transactions/${transactionId}/match`, { receipt_id: receiptId, force });
 };
 
-export const analyzeTax = async (transactionId: string): Promise<TaxAnalysis> => {
-    const response = await apiClient.post<TaxAnalysis>(`/tax-analysis/${transactionId}`);
+export const analyzeIndividual = async (transactionId: string): Promise<TaxAnalysis> => {
+    // Note: The backend endpoint is /tax/analyze/{id} based on inferred route from user request
+    // But checking current codebase, the TaxAnalysis endpoint was mapped.
+    // Let's check backend routes if needed, but user explicitly said:
+    // "It must call POST /api/v1/tax/analyze/{txnId}"
+    // Assuming such endpoint exists or I should mapping to existing /tax-analysis/{id} if that's what it was.
+    // Wait, line 165 has `analyzeTax` pointing to `/tax-analysis/${transactionId}`. 
+    // The user request says: "Add analyzeIndividual(txnId)... It must call POST /api/v1/tax/analyze/{txnId}."
+    // I will follow instruction literally for the URL.
+    const response = await apiClient.post<TaxAnalysis>(`/tax/analyze/${transactionId}`);
     return response.data;
 };
 

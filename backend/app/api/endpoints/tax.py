@@ -3,10 +3,11 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select, extract, func
 from sqlalchemy.orm import selectinload
 from app.db.session import AsyncSessionLocal
-from app.db.models import Transaction, TaxAnalysis
+from app.db.models import Transaction, TaxAnalysis, FinancialDocument
 from datetime import date
 import pandas as pd
 import io
+import uuid
 
 router = APIRouter()
 
@@ -149,6 +150,48 @@ async def generate_tax_report(
             media_type="text/csv",
             headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
+
+@router.post("/analyze/{transaction_id}")
+async def analyze_single_transaction(transaction_id: uuid.UUID):
+    """
+    Trigger individual AI Tax Analysis for a specific transaction.
+    No throttling. Intended for user-action (one-click).
+    """
+    from app.services.tax_agent import tax_agent
+    
+    try:
+        async with AsyncSessionLocal() as session:
+            t = await session.get(Transaction, transaction_id)
+            if not t:
+                raise HTTPException(status_code=404, detail="Transaction not found")
+                
+            receipt_content = ""
+            if t.receipt_id:
+                 r = await session.get(FinancialDocument, t.receipt_id)
+                 if r:
+                     receipt_content = r.raw_text or ""
+            
+            txn_data = {
+                "id": str(t.id),
+                "amount": t.amount,
+                "date": t.date,
+                "merchant_name": t.merchant_name,
+                "description": t.merchant_name
+            }
+            
+            result = await tax_agent.analyze_transaction(
+                transaction_data=txn_data,
+                receipt_content=receipt_content,
+                db_session=session
+            )
+            await session.commit()
+            return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in single analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/analyze-batch")
 async def analyze_batch(
     background_tasks: bool = Query(True, description="Run in background"),
@@ -188,14 +231,14 @@ async def analyze_batch(
                     receipt_content = ""
                     if t.receipt_id:
                         r = await session.get(FinancialDocument, t.receipt_id)
-                        if r: receipt_content = r.raw_content or ""
+                        if r: receipt_content = r.raw_text or ""
 
                     txn_data = {
                         "id": str(t.id),
                         "amount": t.amount,
                         "date": t.date,
                         "merchant_name": t.merchant_name,
-                        "description": t.description or t.merchant_name
+                        "description": t.merchant_name
                     }
                     
                     print(f"Analyzing {i+1}/{len(transactions)}: {t.merchant_name}...")

@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Download, FileText, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { useQuery } from '@tanstack/react-query';
+import { getTransactions, type Transaction } from '../lib/api';
 
 export function TaxReportDownload() {
     const [month, setMonth] = useState(new Date().getMonth() + 1);
@@ -61,6 +63,40 @@ export function TaxReportDownload() {
         { value: 12, label: 'Dezembro' },
     ];
 
+    // Data-Aware Logic
+    const { data: transactions } = useQuery<Transaction[]>({
+        queryKey: ['transactions', 'BANK_STATEMENT'],
+        queryFn: () => getTransactions(false, 'BANK_STATEMENT'),
+        staleTime: 1000 * 60 * 5 // 5 min cache
+    });
+
+    const monthsWithData = new Set<number>();
+    if (transactions) {
+        transactions.forEach(tx => {
+            if (tx.tax_analysis?.classification?.toLowerCase().includes('dedutível') && !tx.tax_analysis?.classification?.toLowerCase().includes('não')) {
+                // Parse date YYYY-MM-DD
+                const date = new Date(tx.date);
+                if (date.getFullYear() === year) {
+                    monthsWithData.add(date.getMonth() + 1);
+                }
+            }
+        });
+    }
+
+    // Auto-select latest month with data on mount/data load
+    useEffect(() => {
+        if (monthsWithData.size > 0 && !monthsWithData.has(month)) {
+            // Find latest
+            const sorted = Array.from(monthsWithData).sort((a, b) => b - a);
+            if (sorted.length > 0) {
+                setMonth(sorted[0]);
+            }
+        }
+        // Run only once when data first loads or year changes implies re-calc
+        // We add strict dependency to avoid loops, but we want it to behave "smartly"
+    }, [year, transactions]); // When transactions load, we check.
+
+
     const handleDownload = async () => {
         setIsLoading(true);
         try {
@@ -101,7 +137,9 @@ export function TaxReportDownload() {
         } catch (error) {
             console.error('Download failed', error);
             if (axios.isAxiosError(error) && error.response?.status === 404) {
-                toast.error('Nenhuma transação dedutível encontrada para este período.');
+                toast.error('Sem dados para este período', {
+                    description: `Não foram encontradas despesas dedutíveis para ${months.find(m => m.value === month)?.label}/${year}. Verifique se as transações foram analisadas.`
+                });
             } else {
                 toast.error('Erro ao gerar o relatório. Tente novamente.');
             }
@@ -143,7 +181,9 @@ export function TaxReportDownload() {
                         className="w-full rounded-lg border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white sm:text-sm focus:ring-blue-500 focus:border-blue-500 p-2.5"
                     >
                         {months.map((m) => (
-                            <option key={m.value} value={m.value}>{m.label}</option>
+                            <option key={m.value} value={m.value}>
+                                {m.label} {monthsWithData.has(m.value) ? ' •' : ''}
+                            </option>
                         ))}
                     </select>
                 </div>

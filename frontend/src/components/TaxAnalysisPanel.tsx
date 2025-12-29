@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { updateTaxAnalysis, analyzeTax } from '../lib/api';
+import { updateTaxAnalysis, analyzeIndividual } from '../lib/api';
 import type { TaxAnalysis } from '../lib/api';
 import { CheckCircle2, AlertTriangle, XCircle, Edit2, Save, X, BookOpen, Scale, PlayCircle, Loader2, Copy, CheckSquare } from 'lucide-react';
 import { toast } from 'sonner';
@@ -34,7 +34,7 @@ export const TaxAnalysisPanel: React.FC<TaxAnalysisPanelProps> = ({ transactionI
 
     // Mutations
     const runAnalysisMutation = useMutation({
-        mutationFn: analyzeTax,
+        mutationFn: analyzeIndividual,
         onMutate: () => setIsAnalyzing(true),
         onSuccess: () => {
             toast.success("Tax Analysis Complete");

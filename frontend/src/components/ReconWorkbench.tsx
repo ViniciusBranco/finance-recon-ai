@@ -11,8 +11,8 @@ import {
     uploadStatement,
     uploadReceipt,
     manualMatch,
-    analyzeTax,
     analyzeBatch,
+    analyzeIndividual,
     updateDocument,
 } from '../lib/api';
 import type { Transaction, FinancialDocument, ReconciliationStats } from '../lib/api';
@@ -257,9 +257,10 @@ interface DroppableTransactionProps {
     isMatched: boolean;
     linkedDoc: FinancialDocument | undefined;
     onAnalyze: (id: string) => void;
+    isAnalyzing: boolean;
 }
 
-const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction: tx, isMatched, linkedDoc, onAnalyze }) => {
+const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction: tx, isMatched, linkedDoc, onAnalyze, isAnalyzing }) => {
     const { setNodeRef, isOver } = useDroppable({
         id: tx.id,
         disabled: isMatched
@@ -321,13 +322,20 @@ const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction
                                 <button
                                     onClick={(e) => {
                                         e.stopPropagation();
+                                        if (isAnalyzing) return;
                                         if (tx.tax_analysis) {
                                             setShowTax(!showTax);
                                         } else {
                                             onAnalyze(tx.id);
                                         }
                                     }}
-                                    className={cn("px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5 text-xs font-semibold border shadow-sm", getTaxStatusColor(), showTax && "ring-2 ring-offset-1 ring-blue-500/20")}
+                                    disabled={isAnalyzing}
+                                    className={cn(
+                                        "px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5 text-xs font-semibold border shadow-sm",
+                                        getTaxStatusColor(),
+                                        showTax && "ring-2 ring-offset-1 ring-blue-500/20",
+                                        isAnalyzing && !tx.tax_analysis && "opacity-70 cursor-wait"
+                                    )}
                                 >
                                     {tx.tax_analysis ? (
                                         <>
@@ -336,6 +344,11 @@ const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction
                                                 : <Scale className="w-3.5 h-3.5" />
                                             }
                                             {tx.tax_analysis.classification}
+                                        </>
+                                    ) : isAnalyzing ? (
+                                        <>
+                                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                            Reading...
                                         </>
                                     ) : (
                                         <>
@@ -616,14 +629,40 @@ export const ReconWorkbench: React.FC = () => {
         }
     });
 
-    const analyzeMutation = useMutation({
-        mutationFn: () => analyzeBatch(1),
-        onSuccess: () => {
-            toast.success("Analysis Triggered");
+    const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
+
+    const analyzeItemMutation = useMutation({
+        mutationFn: analyzeIndividual,
+        onMutate: (id) => {
+            setBusyIds(prev => new Set(prev).add(id));
+        },
+        onSuccess: (data) => {
+            toast.success(`Analysis Complete: ${data.classification}`);
             queryClient.invalidateQueries({ queryKey: ['transactions'] });
         },
-        onError: (err) => {
-            toast.error("Analysis Failed", { description: err.message });
+        onError: (_err) => {
+            toast.error("Analysis Failed", { description: "Analysis failed: attribute mismatch. Check backend logs." });
+        },
+        onSettled: (_data, _error, id) => {
+            setBusyIds(prev => {
+                const next = new Set(prev);
+                next.delete(id);
+                return next;
+            });
+        }
+    });
+
+    const analyzeBatchMutation = useMutation({
+        mutationFn: () => analyzeBatch(5), // Increased limit for "Analisar Todos"
+        onMutate: () => {
+            toast.info("Analyzing matches...", { description: "Throttling: 13s interval to respect quota." });
+        },
+        onSuccess: () => {
+            toast.success("Batch Triggered");
+            queryClient.invalidateQueries({ queryKey: ['transactions'] });
+        },
+        onError: (_err) => {
+            toast.error("Batch Failed", { description: "Analysis failed: attribute mismatch. Check backend logs." });
         }
     });
 
@@ -710,12 +749,7 @@ export const ReconWorkbench: React.FC = () => {
             queryClient.invalidateQueries({ queryKey: ['transactions'] });
             queryClient.invalidateQueries({ queryKey: ['documents'] });
 
-            // Trigger Tax Analysis in background
-            analyzeTax(txnId).then(() => {
-                toast.success("Tax Analysis Complete");
-                queryClient.invalidateQueries({ queryKey: ['transactions'] });
-            }).catch(e => console.error("Tax Analysis Trigger Failed", e));
-
+            // Removed Auto-Analysis Trigger
         } catch (err: any) {
             console.error("Match Error:", err);
 
@@ -743,11 +777,10 @@ export const ReconWorkbench: React.FC = () => {
             await manualMatch(pendingMatch.txnId, pendingMatch.receiptId, true);
             toast.success("Forced Match Confirmed");
 
-            // Trigger Tax Analysis in background
-            analyzeTax(pendingMatch.txnId).then(() => {
-                toast.success("Tax Analysis Complete");
-                queryClient.invalidateQueries({ queryKey: ['transactions'] });
-            }).catch(e => console.error("Tax Analysis Trigger Failed", e));
+            await manualMatch(pendingMatch.txnId, pendingMatch.receiptId, true);
+            toast.success("Forced Match Confirmed");
+
+            // Removed Auto-Analysis Trigger
 
             queryClient.invalidateQueries({ queryKey: ['transactions'] });
             queryClient.invalidateQueries({ queryKey: ['documents'] });
@@ -809,6 +842,29 @@ export const ReconWorkbench: React.FC = () => {
                         className="px-4 py-2 rounded-lg font-medium text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20 border border-transparent hover:border-red-200 dark:hover:border-red-900 transition-all text-sm"
                     >
                         {resetMutation.isPending ? "Clearing..." : "Clear All Data"}
+                    </button>
+
+                    <button
+                        onClick={() => analyzeBatchMutation.mutate()}
+                        disabled={analyzeBatchMutation.isPending}
+                        className={cn(
+                            "flex items-center gap-2 px-5 py-2.5 rounded-lg font-semibold text-white shadow-sm transition-all",
+                            analyzeBatchMutation.isPending
+                                ? "bg-purple-400 cursor-not-allowed"
+                                : "bg-purple-600 hover:bg-purple-700 active:scale-95"
+                        )}
+                    >
+                        {analyzeBatchMutation.isPending ? (
+                            <>
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                                Analyzing...
+                            </>
+                        ) : (
+                            <>
+                                <Sparkles className="w-5 h-5" />
+                                Analisar Todos
+                            </>
+                        )}
                     </button>
 
                     <button
@@ -909,7 +965,8 @@ export const ReconWorkbench: React.FC = () => {
                                                     transaction={tx}
                                                     isMatched={isMatched}
                                                     linkedDoc={linkedDoc}
-                                                    onAnalyze={() => analyzeMutation.mutate()}
+                                                    onAnalyze={(id) => analyzeItemMutation.mutate(id)}
+                                                    isAnalyzing={busyIds.has(tx.id)}
                                                 />
                                             );
                                         })}
