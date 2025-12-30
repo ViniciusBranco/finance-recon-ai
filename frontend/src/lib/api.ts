@@ -59,6 +59,15 @@ export interface UploadResponse {
     status?: string;
 }
 
+export interface TaxReport {
+    id: string; // UUID
+    month: number;
+    year: number;
+    filename: string;
+    total_deductible: number;
+    created_at: string;
+}
+
 // --- API Client Setup ---
 
 const API_BASE_URL = 'http://localhost:8000/api/v1';
@@ -72,36 +81,31 @@ export const apiClient = axios.create({
 
 // --- API Functions ---
 
-export const uploadDocument = async (file: File, docType?: 'BANK_STATEMENT' | 'RECEIPT', password?: string): Promise<UploadResponse> => {
+export const uploadDocument = async (file: File, docType?: 'BANK_STATEMENT' | 'RECEIPT', password?: string, month?: number, year?: number): Promise<UploadResponse> => {
     const formData = new FormData();
     formData.append('file', file);
-    if (password) {
-        formData.append('password', password);
-    }
-    if (docType) {
-        formData.append('expected_type', docType);
-    }
+    if (password) formData.append('password', password);
+    if (docType) formData.append('expected_type', docType);
+    if (month) formData.append('month', month.toString());
+    if (year) formData.append('year', year.toString());
 
     // Dynamic timeout based on file size
-    // Minimum 300 seconds (300000ms = 5 minutes) to allow for slow local LLM inference
     const timeout = Math.max(300000, file.size / 20);
 
     const response = await apiClient.post<UploadResponse>('/recon/upload', formData, {
-        headers: {
-            'Content-Type': 'multipart/form-data',
-        },
+        headers: { 'Content-Type': 'multipart/form-data' },
         timeout: timeout
     });
     return response.data;
 };
 
-export const uploadStatement = async (file: File, password?: string): Promise<UploadResponse> => {
+export const uploadStatement = async (file: File, password?: string, month?: number, year?: number): Promise<UploadResponse> => {
     const formData = new FormData();
     formData.append('file', file);
-    if (password) {
-        formData.append('password', password);
-    }
-    // Dynamic timeout
+    if (password) formData.append('password', password);
+    if (month) formData.append('month', month.toString());
+    if (year) formData.append('year', year.toString());
+
     const timeout = Math.max(300000, file.size / 20);
     const response = await apiClient.post<UploadResponse>('/recon/upload/statement', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -110,13 +114,13 @@ export const uploadStatement = async (file: File, password?: string): Promise<Up
     return response.data;
 };
 
-export const uploadReceipt = async (file: File, password?: string): Promise<UploadResponse> => {
+export const uploadReceipt = async (file: File, password?: string, month?: number, year?: number): Promise<UploadResponse> => {
     const formData = new FormData();
     formData.append('file', file);
-    if (password) {
-        formData.append('password', password);
-    }
-    // Dynamic timeout
+    if (password) formData.append('password', password);
+    if (month) formData.append('month', month.toString());
+    if (year) formData.append('year', year.toString());
+
     const timeout = Math.max(300000, file.size / 20);
     const response = await apiClient.post<UploadResponse>('/recon/upload/receipt', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -125,16 +129,9 @@ export const uploadReceipt = async (file: File, password?: string): Promise<Uplo
     return response.data;
 };
 
-export const getDocuments = async (docType?: string, taxStatus?: string): Promise<FinancialDocument[]> => {
-    // Note: If backend endpoint /recon/documents supports tax_status filtering (it probably doesn't yet based on previous file view),
-    // we should update backend or filter client-side. The user request asks to "pass it to the backend".
-    // I will assume backend needs update or supports it (I checked reconciliation.py, it doesn't currently support tax_status in get_documents).
-    // I will pass it anyway as requested "Update getDocuments to accept... pass it to backend", and likely need to update backend too.
-    // Wait, the prompt says "Update getDocuments... and pass it to the backend".
-    // I should check backend support in next step or now. The previous view of `reconciliation.py` showed `get_documents` does NOT accept `tax_status`.
-    // I will update the frontend first as requested here.
+export const getDocuments = async (docType?: string, taxStatus?: string, month?: number, year?: number): Promise<FinancialDocument[]> => {
     const response = await apiClient.get<FinancialDocument[]>('/recon/documents', {
-        params: { doc_type: docType, tax_status: taxStatus }
+        params: { doc_type: docType, tax_status: taxStatus, month, year }
     });
     return response.data;
 };
@@ -143,8 +140,10 @@ export const deleteDocument = async (id: string): Promise<void> => {
     await apiClient.delete(`/recon/documents/${id}`);
 };
 
-export const resetWorkspace = async (): Promise<void> => {
-    await apiClient.delete('/recon/reset');
+export const clearWorkspace = async (month: number, year: number, onlyUnlinked: boolean): Promise<void> => {
+    await apiClient.delete('/recon/clear-workspace', {
+        params: { month, year, only_unlinked: onlyUnlinked }
+    });
 };
 
 export const updateDocument = async (id: string, data: { date?: string; amount?: number }): Promise<FinancialDocument> => {
@@ -152,9 +151,9 @@ export const updateDocument = async (id: string, data: { date?: string; amount?:
     return response.data;
 };
 
-export const getTransactions = async (unlinkedOnly: boolean = false, docType?: string, taxStatus?: string): Promise<Transaction[]> => {
+export const getTransactions = async (unlinkedOnly: boolean = false, docType?: string, taxStatus?: string, month?: number, year?: number): Promise<Transaction[]> => {
     const response = await apiClient.get<Transaction[]>('/recon/transactions', {
-        params: { unlinked_only: unlinkedOnly, doc_type: docType, tax_status: taxStatus },
+        params: { unlinked_only: unlinkedOnly, doc_type: docType, tax_status: taxStatus, month, year },
     });
     return response.data;
 };
@@ -196,4 +195,27 @@ export const updateTaxAnalysis = async (transactionId: string, data: {
 }): Promise<TaxAnalysis> => {
     const response = await apiClient.put<TaxAnalysis>(`/tax-analysis/${transactionId}`, data);
     return response.data;
+};
+
+// --- Tax Report Functions ---
+
+export const getTaxReports = async (): Promise<TaxReport[]> => {
+    const response = await apiClient.get<TaxReport[]>('/tax/reports');
+    return response.data;
+};
+
+export const generateTaxReport = async (month: number, year: number): Promise<TaxReport> => {
+    const response = await apiClient.post<TaxReport>('/tax/reports/generate', null, {
+        params: { month, year }
+    });
+    return response.data;
+};
+
+export const getTaxReportPreview = async (reportId: string): Promise<Record<string, any>[]> => {
+    const response = await apiClient.get<Record<string, any>[]>(`/tax/reports/${reportId}/preview`);
+    return response.data;
+};
+
+export const getTaxReportDownloadUrl = (reportId: string): string => {
+    return `${API_BASE_URL}/tax/reports/${reportId}/download`;
 };

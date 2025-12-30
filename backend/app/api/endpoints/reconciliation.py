@@ -10,7 +10,7 @@ from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 from typing import List
 from app.db.session import get_db
-from app.db.models import FinancialDocument, Transaction, TaxAnalysis
+from app.db.models import FinancialDocument, Transaction, TaxAnalysis, TaxReport
 from app.schemas.document import FinancialDocumentResponse, TransactionResponse
 from app.schemas.match import ManualMatchRequest
 from datetime import date
@@ -18,8 +18,16 @@ from datetime import date
 router = APIRouter()
 
 UPLOAD_DIR = "/tmp/uploads"
+EXPORT_DIR = "/app/exports"
 
-async def _handle_upload(file: UploadFile, password: str | None, expected_type: str | None, db: AsyncSession):
+async def _handle_upload(
+    file: UploadFile, 
+    password: str | None, 
+    expected_type: str | None, 
+    db: AsyncSession,
+    month: int | None = None,
+    year: int | None = None
+):
     if not os.path.exists(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -51,7 +59,9 @@ async def _handle_upload(file: UploadFile, password: str | None, expected_type: 
             password, 
             file_hash=file_hash, 
             original_filename=file.filename,
-            expected_type=expected_type
+            expected_type=expected_type,
+            month=month,
+            year=year
         )
         
         doc_id = result.get("doc_id")
@@ -106,28 +116,34 @@ async def upload_document(
     file: UploadFile = File(...),
     password: str | None = Form(None),
     expected_type: str | None = Form(None),
+    month: int | None = Form(None),
+    year: int | None = Form(None),
     db: AsyncSession = Depends(get_db)
 ):
     """Generic upload endpoint."""
-    return await _handle_upload(file, password, expected_type, db)
+    return await _handle_upload(file, password, expected_type, db, month, year)
 
 @router.post("/upload/statement", summary="Upload a Bank Statement")
 async def upload_statement(
     file: UploadFile = File(...),
     password: str | None = Form(None),
+    month: int | None = Form(None),
+    year: int | None = Form(None),
     db: AsyncSession = Depends(get_db)
 ):
     """Specialized endpoint for Bank Statements."""
-    return await _handle_upload(file, password, "BANK_STATEMENT", db)
+    return await _handle_upload(file, password, "BANK_STATEMENT", db, month, year)
 
 @router.post("/upload/receipt", summary="Upload a Receipt")
 async def upload_receipt(
     file: UploadFile = File(...),
     password: str | None = Form(None),
+    month: int | None = Form(None),
+    year: int | None = Form(None),
     db: AsyncSession = Depends(get_db)
 ):
     """Specialized endpoint for Receipts (Pix, Boleto, NFe)."""
-    return await _handle_upload(file, password, "RECEIPT", db)
+    return await _handle_upload(file, password, "RECEIPT", db, month, year)
 
 @router.post("/reconcile")
 async def reconcile_transactions():
@@ -428,32 +444,119 @@ async def manual_match_transaction(
     await db.commit()
     return {"message": "Match confirmed"}
 
-@router.delete("/reset", status_code=status.HTTP_200_OK)
-async def reset_workspace(db: AsyncSession = Depends(get_db)):
+@router.delete("/clear-workspace", status_code=status.HTTP_200_OK)
+async def clear_workspace(
+    month: int,
+    year: int,
+    only_unlinked: bool = True,
+    db: AsyncSession = Depends(get_db)
+):
     """
-    DANGER: Resets the entire workspace.
-    Deletes ALL transactions and documents.
+    Clears data for a specific competence month/year.
+    - If only_unlinked=True: Deletes only unlinked transactions and unused receipts.
+    - If only_unlinked=False: Deletes ALL non-finalized data.
+    PROTECTION: Never deletes transactions with is_finalized=True.
     """
     try:
-        # 1. Delete all Transactions
-        await db.execute(delete(Transaction))
+        # 1. Identify Transactions to Delete
+        # Conditions:
+        # - Matches Competence
+        # - NOT Finalized
+        # - If only_unlinked: Must be unlinked (receipt_id is None)
         
-        # 2. Delete all Documents
-        await db.execute(delete(FinancialDocument))
+        stmt_tx = select(Transaction).where(
+            Transaction.competence_month == month,
+            Transaction.competence_year == year,
+            Transaction.is_finalized == False
+        )
         
+        if only_unlinked:
+            stmt_tx = stmt_tx.where(Transaction.receipt_id.is_(None))
+            
+        txns_to_delete = (await db.execute(stmt_tx)).scalars().all()
+        txn_ids = [t.id for t in txns_to_delete]
+        
+        if txn_ids:
+             # Delete Tax Analysis first (cascade should handle, but explicit is safe)
+             await db.execute(delete(TaxAnalysis).where(TaxAnalysis.transaction_id.in_(txn_ids)))
+             
+             # Delete Transactions
+             await db.execute(delete(Transaction).where(Transaction.id.in_(txn_ids)))
+        
+        # 2. Identify Documents to Delete
+        # Conditions:
+        # - Matches Competence
+        # - Has NO remaining transactions (orphaned after above delete) OR has NO finalized transactions?
+        # A Document should be deleted if:
+        # - It belongs to this competence
+        # - It has NO transactions that are 'is_finalized=True'
+        # - If only_unlinked: It must NOT be a receipt for any existing transaction?
+        
+        # Let's find documents in this competence
+        stmt_docs = select(FinancialDocument).options(selectinload(FinancialDocument.transactions)).where(
+            FinancialDocument.competence_month == month,
+            FinancialDocument.competence_year == year
+        )
+        all_docs = (await db.execute(stmt_docs)).scalars().all()
+        
+        docs_to_delete = []
+        for doc in all_docs:
+            # Check 1: Does it have any finalized transactions?
+            has_finalized = any(t.is_finalized for t in doc.transactions)
+            if has_finalized:
+                continue # PROTECT
+            
+            # Check 2: If only_unlinked, is it a Receipt used by a live transaction?
+            if only_unlinked and doc.doc_type == "RECEIPT":
+                # Check if any transaction refers to this doc as receipt
+                # We need to query DB for this because doc.transactions is 'linked to document_id', not 'linked as receipt_id' (unless backref exists)
+                # Transaction model has `receipt` interaction, but backref is not strictly defined in list form on Document for receipt usage in provided models.py (it shows `receipt: Mapped[Optional["FinancialDocument"]]` on Transaction but not `receipt_for` on Doc).
+                # So we query:
+                stmt_link = select(Transaction.id).where(Transaction.receipt_id == doc.id)
+                linked_tx = (await db.execute(stmt_link)).first()
+                if linked_tx:
+                    continue # Used as receipt, don't delete
+            
+            # If we are here, it matches competence, has no finalized info, and (if unlinked mode) is not used.
+            # But wait, if we are in only_unlinked mode, do we delete the Bank Statement Document itself? 
+            # Only if it has NO transactions left?
+            # If we deleted some unlinked txns, but others remain (linked ones)?
+            # We should only delete doc if it has NO transactions.
+            
+            # Refresh transactions check since we deleted some in step 1?
+            # Alternatively, we can rely on `doc.transactions` if we refresh or re-query.
+            # Since we deleted txns, the standard check `any(t.is_finalized ...)` might refer to memory objects. 
+            # We should re-check DB count of transactions for this doc.
+            
+            result = await db.execute(select(Transaction.id).where(Transaction.document_id == doc.id))
+            remaining_txns = result.all()
+            
+            if not remaining_txns:
+                 docs_to_delete.append(doc)
+            elif not only_unlinked:
+                 # If explicit clear (not just unlinked), we delete the doc if all its txns were deleted (which they should be if not finalized)
+                 # If remaining_txns exist here, it implies they are finalized (since we filtered finalized in step 1).
+                 # So if remaining exists, we keep doc.
+                 pass
+
+        for doc in docs_to_delete:
+             # Delete file
+             file_path = os.path.join(UPLOAD_DIR, doc.filename)
+             try:
+                 if os.path.exists(file_path):
+                     os.unlink(file_path)
+             except: pass
+             
+             await db.delete(doc)
+             
         await db.commit()
         
-        # 3. Clear Uploads Directory
-        if os.path.exists(UPLOAD_DIR):
-            for filename in os.listdir(UPLOAD_DIR):
-                file_path = os.path.join(UPLOAD_DIR, filename)
-                try:
-                    if os.path.isfile(file_path) or os.path.islink(file_path):
-                        os.unlink(file_path)
-                except Exception:
-                    pass
-                    
-        return {"message": "Workspace cleared"}
+        return {
+            "message": "Workspace cleanup complete", 
+            "deleted_transactions": len(txns_to_delete),
+            "deleted_documents": len(docs_to_delete)
+        }
+        
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

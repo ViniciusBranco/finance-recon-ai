@@ -1,15 +1,19 @@
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from sqlalchemy import select, extract, func
 from sqlalchemy.orm import selectinload
 from app.db.session import AsyncSessionLocal
-from app.db.models import Transaction, TaxAnalysis, FinancialDocument
+from app.db.models import Transaction, TaxAnalysis, FinancialDocument, TaxReport
 from datetime import date
 import pandas as pd
 import io
 import uuid
+import os
 
 router = APIRouter()
+
+EXPORT_DIR = "/app/exports"
+os.makedirs(EXPORT_DIR, exist_ok=True)
 
 @router.get("/quota-status")
 async def get_quota_status():
@@ -34,14 +38,53 @@ async def get_quota_status():
             "remaining": max(0, limit - used)
         }
 
-@router.get("/report/livro-caixa")
+@router.get("/reports")
+async def list_reports():
+    """List all generated tax reports."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(TaxReport).order_by(TaxReport.created_at.desc()))
+        return result.scalars().all()
+
+@router.get("/reports/{report_id}/download")
+async def download_report(report_id: uuid.UUID):
+    """Download a specific tax report CSV."""
+    async with AsyncSessionLocal() as session:
+        report = await session.get(TaxReport, report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found")
+        
+        file_path = os.path.join(EXPORT_DIR, report.filename)
+        if not os.path.exists(file_path):
+             raise HTTPException(status_code=404, detail="Report file missing from disk")
+             
+        return FileResponse(file_path, filename=report.filename, media_type="text/csv")
+
+@router.get("/reports/{report_id}/preview")
+async def preview_report(report_id: uuid.UUID):
+    """Preview first 10 lines of the report JSON."""
+    async with AsyncSessionLocal() as session:
+        report = await session.get(TaxReport, report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found")
+            
+        file_path = os.path.join(EXPORT_DIR, report.filename)
+        if not os.path.exists(file_path):
+             raise HTTPException(status_code=404, detail="Report file missing from disk")
+        
+        try:
+            df = pd.read_csv(file_path, sep=';', decimal=',', encoding='utf-8-sig', nrows=10)
+            return df.to_dict(orient="records")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read CSV: {e}")
+
+@router.post("/reports/generate")
 async def generate_tax_report(
     month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2000, le=2100)
 ):
     """
     Generates a CSV report (Carnê-Leão compliant) for a specific month/year.
-    Returns a downloadable CSV file.
+    Saves to disk and creates a TaxReport record.
     """
     async with AsyncSessionLocal() as session:
         # Query Transactions joined with TaxAnalysis
@@ -63,13 +106,10 @@ async def generate_tax_report(
         transactions = result.scalars().all()
         
         if not transactions:
-            # We can either return 404 or an empty CSV. 
-            # Returning empty CSV is often better for "No data" reports, 
-            # but let's return 404 for clarity if preferred, or just empty.
-            # Let's return 404 to inform the user explicitly.
             raise HTTPException(status_code=404, detail=f"No deductible transactions found for {month:02d}/{year}")
 
         data = []
+        total_val = 0.0
         
         # Category Map
         CATEGORY_MAP = {
@@ -94,6 +134,9 @@ async def generate_tax_report(
         }
 
         for txn in transactions:
+            # Lock transaction as finalized
+            txn.is_finalized = True
+            
             analysis = txn.tax_analysis
             
             # Format Description
@@ -101,6 +144,7 @@ async def generate_tax_report(
             
             # Value (Absolute)
             val = abs(float(txn.amount))
+            total_val += val
             
             # Determine Classification Code
             cat_key = analysis.category
@@ -108,7 +152,7 @@ async def generate_tax_report(
             
             # Refine map based on Merchant/Description
             if code == "P10.01.00012":
-                text = (str(txn.merchant_name) + " " + cat_key).lower()
+                text = (str(txn.merchant_name) + " " + (cat_key or "")).lower()
                 if "vivo" in text or "telefone" in text or "internet" in text: code = "P10.01.00007"
                 elif "surya" in text or "dental" in text or "odonto" in text: code = "P10.01.00005"
                 elif "sabesp" in text or "água" in text: code = "P10.01.00001"
@@ -131,25 +175,24 @@ async def generate_tax_report(
         df = df.sort_values("_sort_date")
         df = df.drop(columns=["_sort_date"])
         
-        # Convert to CSV in-memory
-        stream = io.StringIO()
-        df.to_csv(stream, index=False, encoding='utf-8-sig', sep=';', decimal=',')
+        # Save to Disk
+        file_uuid = f"tax_report_{month:02d}_{year}_{uuid.uuid4().hex[:8]}.csv"
+        file_path = os.path.join(EXPORT_DIR, file_uuid)
         
-        # Reset pointer
-        stream.seek(0)
+        df.to_csv(file_path, index=False, encoding='utf-8-sig', sep=';', decimal=',')
         
-        # Prepare filename
-        filename = f"tax_report_{month:02d}_{year}.csv"
-        
-        # Generator for streaming
-        def iterfile():
-            yield stream.getvalue()
-
-        return StreamingResponse(
-            iterfile(),
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        # Create DB Record
+        new_report = TaxReport(
+            month=month,
+            year=year,
+            filename=file_uuid,
+            total_deductible=total_val
         )
+        session.add(new_report)
+        await session.commit()
+        await session.refresh(new_report)
+        
+        return new_report
 
 @router.post("/analyze/{transaction_id}")
 async def analyze_single_transaction(transaction_id: uuid.UUID):

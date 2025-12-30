@@ -3,46 +3,19 @@ import axios from 'axios';
 import { Download, FileText, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useQuery } from '@tanstack/react-query';
-import { getTransactions, type Transaction } from '../lib/api';
+import { useNavigate } from 'react-router-dom';
+import { getTransactions, generateTaxReport, type Transaction } from '../lib/api';
 
 export function TaxReportDownload() {
+    // State
     const [month, setMonth] = useState(new Date().getMonth() + 1);
     const [year, setYear] = useState(new Date().getFullYear());
     const [isLoading, setIsLoading] = useState(false);
-    const [isBatchLoading, setIsBatchLoading] = useState(false);
-    const [quota, setQuota] = useState<{ used: number; limit: number; remaining: number } | null>(null);
+    const navigate = useNavigate();
 
-    const getApiUrl = () => {
-        // @ts-ignore
-        const envUrl = import.meta.env.VITE_API_URL;
-        return envUrl || 'http://localhost:8000';
-    };
 
-    useEffect(() => {
-        fetchQuota();
-    }, []);
 
-    const fetchQuota = async () => {
-        try {
-            const res = await axios.get(`${getApiUrl()}/api/v1/tax/quota-status`);
-            setQuota(res.data);
-        } catch (e) {
-            console.error("Failed to fetch quota", e);
-        }
-    };
 
-    const handleBatchAnalyze = async () => {
-        setIsBatchLoading(true);
-        try {
-            const res = await axios.post(`${getApiUrl()}/api/v1/tax-analysis/batch`);
-            toast.success(res.data.message);
-            fetchQuota(); // Refresh quota
-        } catch (error) {
-            toast.error("Erro na análise em lote.");
-        } finally {
-            setIsBatchLoading(false);
-        }
-    };
 
     // Generate Year Options (CurrentYear - 2 to CurrentYear + 1)
     const currentYear = new Date().getFullYear();
@@ -100,42 +73,11 @@ export function TaxReportDownload() {
     const handleDownload = async () => {
         setIsLoading(true);
         try {
-            const getApiUrl = () => {
-                // @ts-ignore
-                const envUrl = import.meta.env.VITE_API_URL;
-                return envUrl || 'http://localhost:8000';
-            };
-
-            const response = await axios.get(`${getApiUrl()}/api/v1/tax/report/livro-caixa`, {
-                params: { month, year },
-                responseType: 'blob',
-            });
-
-            // Create blob link to download
-            const url = window.URL.createObjectURL(new Blob([response.data]));
-            const link = document.createElement('a');
-            link.href = url;
-
-            // Extract filename from header or default
-            const contentDisposition = response.headers['content-disposition'];
-            let filename = `tax_report_${month.toString().padStart(2, '0')}_${year}.csv`;
-            if (contentDisposition) {
-                const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
-                if (filenameMatch && filenameMatch.length === 2)
-                    filename = filenameMatch[1];
-            }
-
-            link.setAttribute('download', filename);
-            document.body.appendChild(link);
-            link.click();
-
-            // Cleanup
-            link.remove();
-            window.URL.revokeObjectURL(url);
-
-            toast.success('Relatório baixado com sucesso!');
+            await generateTaxReport(month, year);
+            toast.success('Relatório gerado com sucesso!');
+            navigate('/history');
         } catch (error) {
-            console.error('Download failed', error);
+            console.error('Generation failed', error);
             if (axios.isAxiosError(error) && error.response?.status === 404) {
                 toast.error('Sem dados para este período', {
                     description: `Não foram encontradas despesas dedutíveis para ${months.find(m => m.value === month)?.label}/${year}. Verifique se as transações foram analisadas.`
@@ -158,14 +100,6 @@ export function TaxReportDownload() {
                     <div>
                         <div className="flex items-center gap-2">
                             <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Relatório Livro-Caixa</h3>
-                            {quota && (
-                                <span className={`text-xs px-2 py-0.5 rounded-full font-medium border ${quota.remaining > 0
-                                    ? 'bg-green-100 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-400 dark:border-green-800'
-                                    : 'bg-red-100 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-800'
-                                    }`}>
-                                    Quota Diária: {quota.used} / {quota.limit}
-                                </span>
-                            )}
                         </div>
                         <p className="text-sm text-slate-500 dark:text-slate-400">Gere o arquivo CSV compatível com o Carnê-Leão e analise pendências.</p>
                     </div>
@@ -201,14 +135,7 @@ export function TaxReportDownload() {
                     </select>
                 </div>
 
-                <button
-                    onClick={handleBatchAnalyze}
-                    disabled={isBatchLoading || (quota?.remaining !== undefined && quota.remaining <= 0)}
-                    className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm shadow-purple-500/20"
-                >
-                    {isBatchLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-                    {isBatchLoading ? 'Processando (13s/item)...' : 'Analisar Pendentes'}
-                </button>
+
 
                 <button
                     onClick={handleDownload}

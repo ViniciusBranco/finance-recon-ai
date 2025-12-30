@@ -23,6 +23,10 @@ class FinancialDocument(Base):
     ingestion_logs: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     
+    # Competence Tracking
+    competence_month: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    competence_year: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    
     transactions: Mapped[list["Transaction"]] = relationship(
         back_populates="document", 
         cascade="all, delete-orphan",
@@ -38,6 +42,11 @@ class Transaction(Base):
     date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    
+    # Competence Tracking & Locking
+    competence_month: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    competence_year: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    is_finalized: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Reconciliation fields
     receipt_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("financial_documents.id"), nullable=True)
@@ -83,3 +92,13 @@ class TaxAnalysis(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     transaction: Mapped["Transaction"] = relationship(back_populates="tax_analysis")
+
+class TaxReport(Base):
+    __tablename__ = "tax_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    month: Mapped[int] = mapped_column(Integer, nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    total_deductible: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

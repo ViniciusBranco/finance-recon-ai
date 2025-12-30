@@ -11,6 +11,8 @@ class FinancialDocument(BaseModel):
     merchant_or_bank: Optional[str] = Field(default=None, description="Name of the merchant or bank")
     raw_content: Optional[str] = Field(default=None, description="Raw extracted text content for debugging")
     transactions: Optional[list[dict]] = Field(default=None, description="List of extracted transactions for statements")
+    competence_month: Optional[int] = Field(default=None)
+    competence_year: Optional[int] = Field(default=None)
 
 class ProcessingState(TypedDict):
     file_path: str
@@ -21,6 +23,8 @@ class ProcessingState(TypedDict):
     ingestion_logs: Optional[dict]
     extracted_data: Optional[FinancialDocument]
     error: Optional[str]
+    month: Optional[int]
+    year: Optional[int]
 
 # --- DB Response Schemas ---
 

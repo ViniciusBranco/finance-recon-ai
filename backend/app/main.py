@@ -7,6 +7,13 @@ from app.api.endpoints import reconciliation, tax_analysis, tax
 
 app = FastAPI(title=settings.PROJECT_NAME, version="0.1.0")
 
+@app.on_event("startup")
+async def startup_event():
+    from app.db.session import engine
+    from app.db.models import Base
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,

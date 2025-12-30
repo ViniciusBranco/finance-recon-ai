@@ -47,7 +47,9 @@ def parse_xml(state: ProcessingState) -> ProcessingState:
             date=date_str,
             amount=amount,
             merchant_or_bank=merchant,
-            raw_content="XML Parsed"
+            raw_content="XML Parsed",
+            competence_month=state.get("month"),
+            competence_year=state.get("year")
         )
         return {**state, "extracted_data": doc}
     except Exception as e:
@@ -158,7 +160,9 @@ def parse_csv(state: ProcessingState) -> ProcessingState:
             file_name=os.path.basename(file_path),
             doc_type="BANK_STATEMENT", # CSV is typically a statement
             raw_content="CSV Parsed via Pandas",
-            transactions=transactions
+            transactions=transactions,
+            competence_month=state.get("month"),
+            competence_year=state.get("year")
         )
         
         return {**state, "extracted_data": doc}
@@ -199,7 +203,9 @@ def extract_pdf_text(state: ProcessingState) -> ProcessingState:
         doc = FinancialDocument(
             file_name=os.path.basename(state["file_path"]),
             doc_type="UNKNOWN",
-            raw_content=text_content
+            raw_content=text_content,
+            competence_month=state.get("month"),
+            competence_year=state.get("year")
         )
         return {**state, "extracted_data": doc}
 
@@ -571,8 +577,27 @@ def _parse_generic_receipt_fast_track(text: str) -> dict | None:
              if m:
                  data["amount"] = float(m.group(1).replace(".", "").replace(",", "."))
 
-        data["merchant_or_bank"] = text_flat[:50].strip() if not data.get("merchant_or_bank") else data["merchant_or_bank"]
-
+        if not data.get("merchant_or_bank") or len(data.get("merchant_or_bank", "")) < 3:
+             # Fallback Recovery: Take first 4 significant tokens/lines as candidate
+             # This helps with VIVO/TIM receipts where "VIVO" is in header but not labeled "Merchant"
+             lines = text_flat.splitlines()[:4]
+             candidate = " ".join([l.strip() for l in lines if len(l.strip()) > 2])
+             candidate = re.sub(r'[\d\.\-\/]+', '', candidate) # Strip numbers
+             candidate = candidate[:50].strip()
+             if len(candidate) > 2:
+                 data["merchant_or_bank"] = candidate
+                 
+        if data.get("date") and data.get("amount"):
+            return data
+        
+        # 3. Numeric Extraction (Identifiers)
+        # Extract sequences of 8+ digits, stripping dots/slashes/dashes
+        # Used for substring matching in Reconciler
+        raw_clean = re.sub(r'[\.\-\/\s]', '', text_flat)
+        identifiers = re.findall(r'(\d{8,})', raw_clean)
+        # Filter duplicates and valid length
+        data["identifiers"] = list(set([idl for idl in identifiers if len(idl) >= 8 and len(idl) <= 48]))
+        
         if data.get("date") and data.get("amount"):
             return data
     except: pass
@@ -812,6 +837,10 @@ async def process_document(file_path: str, password: str = None, file_hash: str 
                 db_doc.ingestion_method = result.get("ingestion_method")
                 db_doc.ingestion_logs = result.get("ingestion_logs")
                 
+                # Competence (from User Input)
+                db_doc.competence_month = getattr(extracted, 'competence_month', None)
+                db_doc.competence_year = getattr(extracted, 'competence_year', None)
+                
                 # Save Transactions
                 if extracted.transactions:
                     # Logic for Bank Statements with multiple transactions
@@ -835,14 +864,25 @@ async def process_document(file_path: str, password: str = None, file_hash: str 
                             
                             t_curr = getattr(txn, 'currency', None) or txn.get('currency')
                             
-                            txn_date_obj = datetime.strptime(t_date, "%Y-%m-%d").date() if t_date else datetime.utcnow().date()
+                            txn_date_obj = datetime.strptime(str(t_date), "%Y-%m-%d").date() if t_date else datetime.utcnow().date()
                             
+                            final_desc = t_desc or "Unknown"
+                            # Append identifiers if present to aid reconciliation
+                            if getattr(extracted, "identifiers", None):
+                                # Take top 2 identifiers to avoid clutter
+                                ids_str = " ".join(extracted.identifiers[:2])
+                                final_desc = f"{final_desc} {ids_str}"
+
                             new_txn = DBTransaction(
                                 document_id=db_doc.id,
-                                merchant_name=t_desc or "Unknown",
+                                merchant_name=final_desc,
                                 date=txn_date_obj,
                                 amount=t_amount or 0.0,
                                 category="General",
+                                # Competence
+                                competence_month=db_doc.competence_month,
+                                competence_year=db_doc.competence_year,
+                                is_finalized=False,
                                 # Reset Match State
                                 receipt_id=None,
                                 match_score=None,
@@ -869,12 +909,21 @@ async def process_document(file_path: str, password: str = None, file_hash: str 
                                  try: txn_date_obj = datetime.strptime(str(t_date), "%Y-%m-%d").date()
                                  except: pass
                          
+                         final_desc = t_desc
+                         if getattr(extracted, "identifiers", None):
+                             ids_str = " ".join(extracted.identifiers[:2])
+                             final_desc = f"{final_desc} {ids_str}"
+                         
                          new_txn = DBTransaction(
                                 document_id=db_doc.id,
-                                merchant_name=t_desc,
+                                merchant_name=final_desc,
                                 date=txn_date_obj,
                                 amount=t_amount,
                                 category="Receipt",
+                                # Competence
+                                competence_month=db_doc.competence_month,
+                                competence_year=db_doc.competence_year,
+                                is_finalized=False,
                                 # Reset Match State
                                 receipt_id=None,
                                 match_score=None,

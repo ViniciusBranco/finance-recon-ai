@@ -18,7 +18,7 @@ class ReconciliationEngine:
         )
         bank_transactions = (await session.execute(stmt_bank)).scalars().all()
         
-        stmt_receipts = select(Transaction).join(Transaction.document).where(
+        stmt_receipts = select(Transaction).options(selectinload(Transaction.document)).join(Transaction.document).where(
             FinancialDocument.doc_type == "RECEIPT"
         )
         receipt_transactions = (await session.execute(stmt_receipts)).scalars().all()
@@ -63,6 +63,43 @@ class ReconciliationEngine:
                     receipt_txn.merchant_name.lower()
                 ) / 100.0
                 
+                # Rule 2.1: Numeric Identifier Check (Deep Metadata)
+                # Check for shared long numeric sequences (identifiers)
+                bank_digits = re.findall(r'(\d{6,})', re.sub(r'[\.\-\/\s]', '', bank_txn.merchant_name))
+                receipt_digits = re.findall(r'(\d{6,})', re.sub(r'[\.\-\/\s]', '', receipt_txn.merchant_name))
+                
+                identifier_match = False
+                if bank_digits and receipt_digits:
+                    # Check intersection
+                    if set(bank_digits) & set(receipt_digits):
+                        identifier_match = True
+                        name_score = max(name_score, 0.95) # Force high match score for ID match
+                
+                # Rule 2.2: Keyword Intersection Score (Semantic Fallback)
+                # If fuzzy fail, check if meaningful tokens from bank desc appear in PDF raw text
+                # e.g. "VIVO FIXO" (Bank) vs "0082... VIVO ... FIXO" (PDF)
+                if name_score < 0.6 and receipt_txn.document and receipt_txn.document.raw_text:
+                    # Clean words like "PAG", "BOLETO", "INT", small numbers
+                    raw_bank = re.sub(r"(?i)(PAG|BOLETO|PIX|TRANSF|COMPRA|ENVIO|INT|DOC|TED|QRS|[\d]{1,2})", " ", bank_txn.merchant_name)
+                    bank_tokens = [t for t in re.split(r'[\s\/\-\.]', raw_bank) if len(t) > 2]
+                    
+                    if bank_tokens:
+                        hits = 0
+                        doc_text = receipt_txn.document.raw_text.upper()
+                        for token in bank_tokens:
+                            if token.upper() in doc_text:
+                                hits += 1
+                        
+                        keyword_score = hits / len(bank_tokens)
+                        
+                        # Special Case: DARF/GPS
+                        if "DARF" in bank_txn.merchant_name.upper() and ("DARF" in doc_text or "RECEITA FEDERAL" in doc_text):
+                             keyword_score = max(keyword_score, 1.0)
+                        
+                        if keyword_score > 0.75:
+                             # Boost confidence if keywords match strongly
+                             name_score = max(name_score, 0.90)
+
                 # Rule 3: Date Proximity Score
                 # Closer dates get higher priority (e.g., diff 0 = 1.0, diff 5 = 0.5)
                 proximity_score = 1.0 - (abs(date_diff) * 0.1)

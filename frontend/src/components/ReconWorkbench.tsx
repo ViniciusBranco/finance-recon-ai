@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useDropzone } from 'react-dropzone';
 import {
@@ -6,7 +6,6 @@ import {
     getTransactions,
     triggerReconciliation,
     deleteDocument,
-    resetWorkspace,
     uploadDocument,
     uploadStatement,
     uploadReceipt,
@@ -14,6 +13,7 @@ import {
     analyzeBatch,
     analyzeIndividual,
     updateDocument,
+    clearWorkspace,
 } from '../lib/api';
 import type { Transaction, FinancialDocument, ReconciliationStats } from '../lib/api';
 import { RefreshCw, CheckCircle, FileText, Link as LinkIcon, Trash2, Upload, Loader2, AlertCircle, AlertTriangle, Scale, ArrowUpDown, Edit3, Save, X, Sparkles } from 'lucide-react';
@@ -21,6 +21,7 @@ import { TaxAnalysisPanel } from './TaxAnalysisPanel';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { toast } from 'sonner';
+import axios from 'axios';
 import { DndContext, useDraggable, useDroppable, DragOverlay } from '@dnd-kit/core';
 import type { DragEndEvent, DragStartEvent } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
@@ -29,17 +30,48 @@ function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs));
 }
 
-const formatDate = (dateString: string | null | undefined) => {
+// --- Helpers ---
+const formatDate = (dateString: string) => {
     if (!dateString) return '-';
-    // Handle YYYY-MM-DD for consistency
+    // Handle YYYY-MM-DD for consistency (avoid timezone shift)
     const parts = dateString.split('T')[0].split('-');
-    if (parts.length !== 3) return dateString;
+    if (parts.length !== 3) return new Date(dateString).toLocaleDateString('pt-BR');
     const [y, m, d] = parts;
     return `${d}/${m}/${y}`;
 };
 
 const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(amount);
+};
+
+const findCommonIdentifier = (str1: string | undefined, str2: string | undefined): string | null => {
+    if (!str1 || !str2) return null;
+    const normalize = (s: string) => s.replace(/[\.\-\/\s]/g, '');
+    const regex = /(\d{6,})/g;
+    const digits1 = normalize(str1).match(regex);
+    const digits2 = normalize(str2).match(regex);
+
+    if (digits1 && digits2) {
+        const set1 = new Set(digits1);
+        for (const digit of digits2) {
+            if (set1.has(digit)) return digit;
+        }
+    }
+    return null;
+};
+
+const findCommonKeywords = (str1: string | undefined, str2: string | undefined): string[] => {
+    if (!str1 || !str2) return [];
+    // Split by spaces, lowercase, filter out short words (<3 chars) or irrelevant ones if needed
+    const tokenize = (s: string) => s.toLowerCase().split(/[\s\-_]+/).filter(w => w.length > 2);
+    const words1 = new Set(tokenize(str1));
+    const words2 = tokenize(str2);
+
+    const common: string[] = [];
+    for (const w of words2) {
+        if (words1.has(w) && !common.includes(w.toUpperCase())) common.push(w.toUpperCase());
+    }
+    return common;
 };
 
 // --- Drag & Drop Components ---
@@ -167,51 +199,33 @@ const DraggableReceipt: React.FC<DraggableReceiptProps> = ({ doc, isLinked, onDe
             {...listeners}
             {...attributes}
             className={cn(
-                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group cursor-grab active:cursor-grabbing relative flex flex-col justify-between min-h-[150px]",
-                isActuallyLinked && "opacity-75 cursor-default",
-                requiresReview && !isActuallyLinked && "border-l-4 border-amber-500 bg-amber-50/50 dark:bg-amber-900/10",
-                !requiresReview && !isActuallyLinked && "bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800"
+                "flex flex-col justify-between p-4 bg-white dark:bg-slate-900/50 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm transition-all hover:shadow-md group/card min-h-[150px]",
+                isActuallyLinked && "opacity-75 cursor-default bg-slate-50 dark:bg-slate-900/30",
+                requiresReview && !isActuallyLinked && "border-amber-500 bg-amber-50 dark:bg-amber-900/10"
             )}
         >
-            {/* Top Section: Merchant/Filename & Amount */}
-            <div className="flex items-start justify-between gap-3 w-full">
-                <div className="flex items-start gap-3 min-w-0">
-                    <div className={cn(
-                        "p-2 rounded-lg flex-shrink-0",
-                        isActuallyLinked
-                            ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40 dark:text-emerald-500"
-                            : requiresReview
-                                ? "bg-amber-100 text-amber-600 dark:bg-amber-900/40 dark:text-amber-500"
-                                : "bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400"
-                    )}>
-                        {isActuallyLinked ? <LinkIcon className="w-5 h-5" /> : requiresReview ? <AlertTriangle className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
-                    </div>
-                    <p className="font-medium text-slate-900 dark:text-slate-100 line-clamp-2 max-w-[140px] sm:max-w-[180px]" title={doc.original_filename || doc.filename}>
-                        {doc.original_filename || doc.filename}
-                    </p>
-                </div>
-
-                {receiptTx ? (
-                    <span className="font-mono font-semibold text-slate-700 dark:text-slate-300 ml-2 whitespace-nowrap">
-                        {formatCurrency(receiptTx.amount)}
-                    </span>
-                ) : (
-                    <span className="text-amber-600 dark:text-amber-500 text-xs font-medium whitespace-nowrap">--</span>
-                )}
+            {/* Row 1: Header (Title & Amount) */}
+            <div className="flex justify-between items-start w-full">
+                <span className="font-medium text-slate-900 dark:text-slate-100 line-clamp-2 pr-2 leading-tight" title={doc.original_filename || doc.filename}>
+                    {doc.original_filename || doc.filename}
+                </span>
+                <span className="font-mono font-semibold text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                    {receiptTx ? formatCurrency(receiptTx.amount) : "--"}
+                </span>
             </div>
 
-            {/* Bottom Section: Date, Badges, Actions */}
-            <div className="flex items-end justify-between w-full">
+            {/* Row 2: Footer (Date, Badges & Actions) */}
+            <div className="flex items-end justify-between w-full mt-4">
                 <div className="flex flex-col gap-2">
                     <span className="text-sm text-slate-500 dark:text-slate-400">
                         {receiptTx ? formatDate(receiptTx.date) : "No Date"}
                     </span>
-
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                         {isActuallyLinked && (
-                            <span className="flex-shrink-0 inline-flex items-center rounded-md bg-emerald-500 px-2 py-1 text-xs font-medium text-white shadow-sm">
+                            <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800 cursor-help" title="Linked to Transaction">
+                                <LinkIcon className="w-3 h-3" />
                                 Linked
-                            </span>
+                            </div>
                         )}
                         {requiresReview && !isActuallyLinked && (
                             <span className="flex-shrink-0 inline-flex items-center rounded-md bg-amber-100 px-2 py-1 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
@@ -221,7 +235,8 @@ const DraggableReceipt: React.FC<DraggableReceiptProps> = ({ doc, isLinked, onDe
                     </div>
                 </div>
 
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                {/* Slot for specific actions */}
+                <div className="flex items-center gap-2 opacity-0 group-hover/card:opacity-100 transition-opacity">
                     {!isActuallyLinked && (
                         <button
                             onPointerDown={(e) => e.stopPropagation()}
@@ -241,10 +256,10 @@ const DraggableReceipt: React.FC<DraggableReceiptProps> = ({ doc, isLinked, onDe
                             e.stopPropagation();
                             if (confirm('Delete this document?')) onDelete(doc.id);
                         }}
-                        className="p-1.5 text-slate-400 hover:text-red-500 rounded bg-white dark:bg-slate-800 shadow-sm border border-slate-200 dark:border-slate-700"
+                        className="p-2 text-slate-400 hover:text-red-500 rounded-lg bg-white/50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 shadow-sm"
                         title="Delete"
                     >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <Trash2 className="w-4 h-4" />
                     </button>
                 </div>
             </div>
@@ -280,129 +295,138 @@ const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction
         <li
             ref={setNodeRef}
             className={cn(
-                "p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group border-l-4 flex flex-col justify-between min-h-[150px] gap-3",
+                "flex flex-col justify-between p-4 bg-white dark:bg-slate-900/50 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm transition-all hover:shadow-md group/card min-h-[150px]",
                 isMatched
                     ? "bg-emerald-50/30 dark:bg-emerald-900/10 border-emerald-500"
-                    : "border-transparent bg-white dark:bg-slate-900",
+                    : "",
                 isOver && !isMatched && "bg-blue-50 dark:bg-blue-900/20 border-blue-500 ring-1 ring-inset ring-blue-500/20"
             )}
         >
-            <div className="flex flex-col justify-between h-full bg-transparent">
-                {/* Top Section: Merchant Name & Amount */}
-                <div className="flex justify-between items-start w-full">
-                    <span className="font-medium text-slate-900 dark:text-slate-100 line-clamp-2 pr-2 leading-tight" title={tx.merchant_name}>
-                        {tx.merchant_name}
-                    </span>
-                    <span className="font-mono font-semibold text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                        {formatCurrency(tx.amount)}
-                    </span>
+            {/* Row 1: Header (Title & Amount) */}
+            <div className="flex justify-between items-start w-full">
+                <span className="font-medium text-slate-900 dark:text-slate-100 line-clamp-2 pr-2 leading-tight" title={tx.merchant_name}>
+                    {tx.merchant_name}
+                </span>
+                <span className="font-mono font-semibold text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                    {formatCurrency(tx.amount)}
+                </span>
+            </div>
+
+            {/* Row 2: Footer (Date, Badges & Actions) */}
+            <div className="flex items-end justify-between w-full mt-4">
+                <div className="flex flex-col gap-2">
+                    <span className="text-sm text-slate-500 dark:text-slate-400">{formatDate(tx.date)}</span>
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {isMatched ? (
+                            <div
+                                className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800 cursor-help"
+                                title={(() => {
+                                    if (!linkedDoc?.transactions?.[0]?.merchant_name) return undefined;
+                                    const docMerchant = linkedDoc.transactions[0].merchant_name;
+                                    const commonId = findCommonIdentifier(tx.merchant_name, docMerchant);
+                                    if (commonId) return `Linked via ID: ${commonId}`;
+
+                                    const commonKw = findCommonKeywords(tx.merchant_name, docMerchant);
+                                    if (commonKw.length > 0) return `Matched via Keywords: ${commonKw.join(', ')}`;
+
+                                    return `Scanned Merchant: ${docMerchant}`;
+                                })()}
+                            >
+                                <LinkIcon className="w-3 h-3" />
+                                {linkedDoc ? `Linked` : `Matched (${(tx.match_score! * 100).toFixed(0)}%)`}
+                            </div>
+                        ) : (
+                            <span className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full text-slate-500">
+                                Unlinked
+                            </span>
+                        )}
+                    </div>
                 </div>
 
-                {/* Bottom Section: Date, Actions, Badges */}
-                <div className="flex items-end justify-between w-full">
-                    <div className="flex flex-col gap-2">
-                        <span className="text-sm text-slate-500 dark:text-slate-400">{formatDate(tx.date)}</span>
-                        <div className="flex items-center gap-2 flex-wrap">
-                            {isMatched ? (
-                                <div
-                                    className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800 cursor-help"
-                                    title={linkedDoc?.transactions?.[0]?.merchant_name ? `Scanned Merchant: ${linkedDoc.transactions[0].merchant_name}` : undefined}
-                                >
-                                    <LinkIcon className="w-3 h-3" />
-                                    {linkedDoc ? `Linked` : `Matched (${(tx.match_score! * 100).toFixed(0)}%)`}
-                                </div>
-                            ) : (
-                                <span className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full text-slate-500">
-                                    Unlinked
-                                </span>
-                            )}
-                        </div>
-                    </div>
-
-                    <div className="flex items-center relative group/tooltip">
-                        {isMatched && (
-                            <>
-                                <button
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        if (isAnalyzing) return;
-                                        if (tx.tax_analysis) {
-                                            setShowTax(!showTax);
-                                        } else {
-                                            onAnalyze(tx.id);
+                {/* Slot for specific actions */}
+                <div className="flex items-center relative group/tooltip">
+                    {isMatched && (
+                        <>
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (isAnalyzing) return;
+                                    if (tx.tax_analysis) {
+                                        setShowTax(!showTax);
+                                    } else {
+                                        onAnalyze(tx.id);
+                                    }
+                                }}
+                                disabled={isAnalyzing}
+                                className={cn(
+                                    "px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5 text-xs font-semibold border shadow-sm",
+                                    getTaxStatusColor(),
+                                    showTax && "ring-2 ring-offset-1 ring-blue-500/20",
+                                    isAnalyzing && !tx.tax_analysis && "opacity-70 cursor-wait"
+                                )}
+                            >
+                                {tx.tax_analysis ? (
+                                    <>
+                                        {tx.tax_analysis.classification.toLowerCase().includes('dedutível') && !tx.tax_analysis.classification.toLowerCase().includes('não')
+                                            ? <Sparkles className="w-3.5 h-3.5" />
+                                            : <Scale className="w-3.5 h-3.5" />
                                         }
-                                    }}
-                                    disabled={isAnalyzing}
-                                    className={cn(
-                                        "px-3 py-1.5 rounded-full transition-all flex items-center gap-1.5 text-xs font-semibold border shadow-sm",
-                                        getTaxStatusColor(),
-                                        showTax && "ring-2 ring-offset-1 ring-blue-500/20",
-                                        isAnalyzing && !tx.tax_analysis && "opacity-70 cursor-wait"
-                                    )}
-                                >
-                                    {tx.tax_analysis ? (
-                                        <>
-                                            {tx.tax_analysis.classification.toLowerCase().includes('dedutível') && !tx.tax_analysis.classification.toLowerCase().includes('não')
-                                                ? <Sparkles className="w-3.5 h-3.5" />
-                                                : <Scale className="w-3.5 h-3.5" />
-                                            }
-                                            {tx.tax_analysis.classification}
-                                        </>
-                                    ) : isAnalyzing ? (
-                                        <>
-                                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                            Reading...
-                                        </>
-                                    ) : (
-                                        <>
-                                            <Sparkles className="w-3.5 h-3.5" />
-                                            Analyze
-                                        </>
-                                    )}
-                                </button>
+                                        {tx.tax_analysis.classification}
+                                    </>
+                                ) : isAnalyzing ? (
+                                    <>
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        Reading...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Sparkles className="w-3.5 h-3.5" />
+                                        Analyze
+                                    </>
+                                )}
+                            </button>
 
-                                {/* Rich Hover Card for Analysis Results */}
-                                {tx.tax_analysis && (
-                                    <div className="absolute bottom-full mb-2 right-0 w-72 bg-white dark:bg-slate-950 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 p-4 opacity-0 group-hover/tooltip:opacity-100 transition-opacity pointer-events-none z-50 text-left">
-                                        <div className="flex items-center gap-2 mb-2">
-                                            <div className={cn(
-                                                "w-2 h-2 rounded-full",
-                                                tx.tax_analysis.classification.toLowerCase().includes('dedutível') && !tx.tax_analysis.classification.toLowerCase().includes('não')
-                                                    ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"
-                                                    : "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]"
-                                            )} />
-                                            <span className="font-bold text-slate-800 dark:text-slate-100 text-sm">
-                                                {tx.tax_analysis.classification}
+                            {/* Rich Hover Card for Analysis Results */}
+                            {tx.tax_analysis && (
+                                <div className="absolute bottom-full mb-2 right-0 w-72 bg-white dark:bg-slate-950 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 p-4 opacity-0 group-hover/tooltip:opacity-100 transition-opacity pointer-events-none z-50 text-left">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <div className={cn(
+                                            "w-2 h-2 rounded-full",
+                                            tx.tax_analysis.classification.toLowerCase().includes('dedutível') && !tx.tax_analysis.classification.toLowerCase().includes('não')
+                                                ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                                                : "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                                        )} />
+                                        <span className="font-bold text-slate-800 dark:text-slate-100 text-sm">
+                                            {tx.tax_analysis.classification}
+                                        </span>
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        <div className="text-xs">
+                                            <span className="text-slate-500 dark:text-slate-400 font-medium">Category:</span>
+                                            <span className="ml-1 text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                                                {tx.tax_analysis.category || "General"}
                                             </span>
                                         </div>
 
-                                        <div className="space-y-2">
-                                            <div className="text-xs">
-                                                <span className="text-slate-500 dark:text-slate-400 font-medium">Category:</span>
-                                                <span className="ml-1 text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
-                                                    {tx.tax_analysis.category || "General"}
-                                                </span>
-                                            </div>
+                                        <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed border-l-2 border-slate-200 dark:border-slate-700 pl-2">
+                                            {tx.tax_analysis.justification_text || tx.tax_analysis.raw_analysis?.comentario || "No rationale provided."}
+                                        </p>
 
-                                            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed border-l-2 border-slate-200 dark:border-slate-700 pl-2">
-                                                {tx.tax_analysis.justification_text || tx.tax_analysis.raw_analysis?.comentario || "No rationale provided."}
-                                            </p>
-
-                                            <div className="pt-2 mt-2 border-t border-slate-100 dark:border-slate-800 flex justify-between items-center">
-                                                <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Estimated Cost</span>
-                                                <span className="font-mono text-sm font-bold text-slate-900 dark:text-slate-100">
-                                                    {formatCurrency(tx.amount)}
-                                                </span>
-                                            </div>
+                                        <div className="pt-2 mt-2 border-t border-slate-100 dark:border-slate-800 flex justify-between items-center">
+                                            <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Estimated Cost</span>
+                                            <span className="font-mono text-sm font-bold text-slate-900 dark:text-slate-100">
+                                                {formatCurrency(tx.amount)}
+                                            </span>
                                         </div>
-
-                                        {/* Arrow */}
-                                        <div className="absolute -bottom-1.5 right-6 w-3 h-3 bg-white dark:bg-slate-950 border-r border-b border-slate-200 dark:border-slate-800 rotate-45"></div>
                                     </div>
-                                )}
-                            </>
-                        )}
-                    </div>
+
+                                    {/* Arrow */}
+                                    <div className="absolute -bottom-1.5 right-6 w-3 h-3 bg-white dark:bg-slate-950 border-r border-b border-slate-200 dark:border-slate-800 rotate-45"></div>
+                                </div>
+                            )}
+                        </>
+                    )}
                 </div>
             </div>
 
@@ -425,9 +449,11 @@ interface CompactDropzoneProps {
     label: string;
     docType?: 'BANK_STATEMENT' | 'RECEIPT';
     onUploadSuccess: (filename: string) => void;
+    month?: number;
+    year?: number;
 }
 
-const CompactDropzone: React.FC<CompactDropzoneProps> = ({ label, docType, onUploadSuccess }) => {
+const CompactDropzone: React.FC<CompactDropzoneProps> = ({ label, docType, onUploadSuccess, month, year }) => {
     const [uploading, setUploading] = useState(false);
     const [currentFile, setCurrentFile] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -441,11 +467,11 @@ const CompactDropzone: React.FC<CompactDropzoneProps> = ({ label, docType, onUpl
         const processFile = async (file: File, pwd?: string) => {
             let result;
             if (docType === 'BANK_STATEMENT') {
-                result = await uploadStatement(file, pwd);
+                result = await uploadStatement(file, pwd, month, year);
             } else if (docType === 'RECEIPT') {
-                result = await uploadReceipt(file, pwd);
+                result = await uploadReceipt(file, pwd, month, year);
             } else {
-                result = await uploadDocument(file, docType, pwd);
+                result = await uploadDocument(file, docType, pwd, month, year);
             }
 
             if (result.status === 'partial_success') {
@@ -582,6 +608,43 @@ export const ReconWorkbench: React.FC = () => {
     const [filter, setFilter] = useState<'ALL' | 'MATCHED' | 'UNLINKED'>('ALL');
     const [taxFilter, setTaxFilter] = useState<'ALL' | 'DEDUCTIBLE' | 'NON_DEDUCTIBLE' | 'PARTIAL' | 'TO_ANALYZE'>('ALL');
     const [activeDoc, setActiveDoc] = useState<FinancialDocument | null>(null);
+    const [quota, setQuota] = useState<{ used: number; limit: number; remaining: number } | null>(null);
+
+    // Workspace Context
+    const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
+    const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+
+    // Clear Workspace Modal State
+    const [clearModalOpen, setClearModalOpen] = useState(false);
+    const [clearMode, setClearMode] = useState<'UNLINKED' | 'ALL'>('UNLINKED');
+
+    // Constants
+    const months = [
+        { value: 1, label: 'Janeiro' }, { value: 2, label: 'Fevereiro' }, { value: 3, label: 'Março' },
+        { value: 4, label: 'Abril' }, { value: 5, label: 'Maio' }, { value: 6, label: 'Junho' },
+        { value: 7, label: 'Julho' }, { value: 8, label: 'Agosto' }, { value: 9, label: 'Setembro' },
+        { value: 10, label: 'Outubro' }, { value: 11, label: 'Novembro' }, { value: 12, label: 'Dezembro' }
+    ];
+    const years = Array.from({ length: 4 }, (_, i) => new Date().getFullYear() - 2 + i);
+
+    const getApiUrl = () => {
+        // @ts-ignore
+        const envUrl = import.meta.env.VITE_API_URL;
+        return envUrl || 'http://localhost:8000';
+    };
+
+    const fetchQuota = async () => {
+        try {
+            const res = await axios.get(`${getApiUrl()}/api/v1/tax/quota-status`);
+            setQuota(res.data);
+        } catch (e) {
+            console.error("Failed to fetch quota", e);
+        }
+    };
+
+    useEffect(() => {
+        fetchQuota();
+    }, []);
 
     // Sorting State
     const [sortBank, setSortBank] = useState<'ASC' | 'DESC' | null>(null);
@@ -592,15 +655,16 @@ export const ReconWorkbench: React.FC = () => {
     const [pendingMatch, setPendingMatch] = useState<{ txnId: string, receiptId: string, message: string } | null>(null);
 
     // Fetch Transactions (Bank Feed) - Explicit Type
+    // Fetch Transactions
     const { data: transactions, isLoading: loadingTx, isError: errorTx } = useQuery<Transaction[]>({
-        queryKey: ['transactions', 'BANK_STATEMENT', taxFilter],
-        queryFn: () => getTransactions(false, 'BANK_STATEMENT', taxFilter === 'ALL' ? undefined : taxFilter),
+        queryKey: ['transactions', 'BANK_STATEMENT', taxFilter, selectedMonth, selectedYear],
+        queryFn: () => getTransactions(false, 'BANK_STATEMENT', taxFilter === 'ALL' ? undefined : taxFilter, selectedMonth, selectedYear),
     });
 
     // Fetch Documents (Receipts) - Explicit Type
     const { data: documents, isLoading: loadingDocs, isError: errorDocs } = useQuery<FinancialDocument[]>({
-        queryKey: ['documents', 'RECEIPT', taxFilter],
-        queryFn: () => getDocuments('RECEIPT', taxFilter === 'ALL' ? undefined : taxFilter),
+        queryKey: ['documents', 'RECEIPT', taxFilter, selectedMonth, selectedYear],
+        queryFn: () => getDocuments('RECEIPT', taxFilter === 'ALL' ? undefined : taxFilter, selectedMonth, selectedYear),
     });
 
     // Reconcile Mutation
@@ -624,12 +688,15 @@ export const ReconWorkbench: React.FC = () => {
     });
 
     const resetMutation = useMutation({
-        mutationFn: resetWorkspace,
+        mutationFn: async () => {
+            await clearWorkspace(selectedMonth, selectedYear, clearMode === 'UNLINKED');
+        },
         onSuccess: () => {
             setLastReconResult(null);
             setResetKey(prev => prev + 1);
             queryClient.invalidateQueries({ queryKey: ['documents'] });
             queryClient.invalidateQueries({ queryKey: ['transactions'] });
+            toast.success('Todos os dados foram expurgados');
         }
     });
 
@@ -836,24 +903,51 @@ export const ReconWorkbench: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-3">
-                    <button
-                        onClick={() => {
-                            if (confirm("DANGER: This will delete ALL transactions and documents. Are you sure?")) {
-                                resetMutation.mutate();
-                            }
-                        }}
-                        disabled={resetMutation.isPending}
-                        className="px-4 py-2 rounded-lg font-medium text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20 border border-transparent hover:border-red-200 dark:hover:border-red-900 transition-all text-sm"
-                    >
-                        {resetMutation.isPending ? "Clearing..." : "Clear All Data"}
-                    </button>
+                    {/* Context Selectors */}
+                    <div className="flex items-center gap-2 mr-2">
+                        <select
+                            value={selectedMonth}
+                            onChange={(e) => setSelectedMonth(Number(e.target.value))}
+                            className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm rounded-md focus:ring-blue-500 focus:border-blue-500 block p-2"
+                        >
+                            {months.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                        </select>
+                        <select
+                            value={selectedYear}
+                            onChange={(e) => setSelectedYear(Number(e.target.value))}
+                            className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-sm rounded-md focus:ring-blue-500 focus:border-blue-500 block p-2"
+                        >
+                            {years.map(y => <option key={y} value={y}>{y}</option>)}
+                        </select>
+                    </div>
 
                     <button
+                        onClick={() => setClearModalOpen(true)}
+                        disabled={resetMutation.isPending}
+                        className="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 px-2 py-1 rounded-md transition-colors cursor-pointer"
+                    >
+                        {resetMutation.isPending ? "Clearing..." : "Limpar Workspace"}
+                    </button>
+                    {quota && (
+                        <div className={cn(
+                            "flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-100 dark:bg-emerald-900/30 border border-emerald-200 dark:border-emerald-800 text-xs font-bold text-emerald-700 dark:text-emerald-400 shadow-sm transition-all",
+                            quota.remaining <= 3 && "animate-pulse ring-2 ring-emerald-500/20"
+                        )} title={`Daily Limit: ${quota.limit}`}>
+                            {quota.remaining <= 3 && (
+                                <span className="relative flex h-2 w-2">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-75"></span>
+                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-600"></span>
+                                </span>
+                            )}
+                            Cota Disponível: {quota.limit - quota.used}/{quota.limit}
+                        </div>
+                    )}
+                    <button
                         onClick={() => analyzeBatchMutation.mutate()}
-                        disabled={analyzeBatchMutation.isPending}
+                        disabled={analyzeBatchMutation.isPending || (quota ? quota.remaining <= 0 : false)}
                         className={cn(
                             "flex items-center gap-2 px-5 py-2.5 rounded-lg font-semibold text-white shadow-sm transition-all",
-                            analyzeBatchMutation.isPending
+                            analyzeBatchMutation.isPending || (quota && quota.remaining <= 0)
                                 ? "bg-purple-400 cursor-not-allowed"
                                 : "bg-purple-600 hover:bg-purple-700 active:scale-95"
                         )}
@@ -955,6 +1049,8 @@ export const ReconWorkbench: React.FC = () => {
                                 label="Upload Bank Statement (PDF, CSV, OFX)"
                                 docType="BANK_STATEMENT"
                                 onUploadSuccess={() => refreshData()}
+                                month={selectedMonth}
+                                year={selectedYear}
                             />
                         </div>
 
@@ -966,8 +1062,8 @@ export const ReconWorkbench: React.FC = () => {
                             ) : bankTransactions.length === 0 ? (
                                 <div className="flex justify-center items-center h-full text-slate-400">No transactions found.</div>
                             ) : (
-                                <div className="overflow-y-auto flex-1">
-                                    <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                                <div className="overflow-y-auto flex-1 p-2">
+                                    <ul className="flex flex-col gap-4">
                                         {bankTransactions.map((tx: Transaction) => {
                                             const isMatched = !!tx.receipt_id;
                                             const linkedDoc = isMatched && tx.receipt_id
@@ -1020,6 +1116,8 @@ export const ReconWorkbench: React.FC = () => {
                                 label="Upload Receipts (PDF, XML, CSV)"
                                 docType="RECEIPT"
                                 onUploadSuccess={() => refreshData()}
+                                month={selectedMonth}
+                                year={selectedYear}
                             />
                         </div>
 
@@ -1031,7 +1129,7 @@ export const ReconWorkbench: React.FC = () => {
                             ) : receiptDocuments.length === 0 ? (
                                 <div className="flex justify-center items-center h-full text-slate-400">No receipts uploaded.</div>
                             ) : (
-                                <div className="overflow-y-auto flex-1 p-2 space-y-2">
+                                <div className="overflow-y-auto flex-1 p-2 flex flex-col gap-4">
                                     {receiptDocuments.map((doc: FinancialDocument) => {
                                         // Strict Linked Logic
                                         const isLinked = !!doc.linked_transaction_id;
@@ -1115,6 +1213,78 @@ export const ReconWorkbench: React.FC = () => {
                                     className="px-4 py-2 text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 rounded-lg"
                                 >
                                     Force Match
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Clear Workspace Modal */}
+            {clearModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+                    <div className="bg-white dark:bg-slate-950 rounded-lg shadow-xl max-w-md w-full overflow-hidden border border-slate-200 dark:border-slate-800 animate-in zoom-in-95 duration-200">
+                        <div className="p-6">
+                            <div className="flex items-center gap-3 mb-4">
+                                <div className="p-2 bg-red-100 dark:bg-red-900/30 rounded-full text-red-600 dark:text-red-500">
+                                    <Trash2 className="w-6 h-6" />
+                                </div>
+                                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">
+                                    Limpar Workspace
+                                </h3>
+                            </div>
+
+                            <p className="text-slate-600 dark:text-slate-300 mb-4">
+                                Deseja limpar os dados de <span className="font-bold">{months.find(m => m.value === selectedMonth)?.label}/{selectedYear}</span>?
+                            </p>
+
+                            <div className="space-y-3 mb-6">
+                                <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
+                                    <input
+                                        type="radio"
+                                        name="clearMode"
+                                        value="UNLINKED"
+                                        checked={clearMode === 'UNLINKED'}
+                                        onChange={() => setClearMode('UNLINKED')}
+                                        className="mt-1"
+                                    />
+                                    <div>
+                                        <p className="font-medium text-slate-900 dark:text-white">Limpar apenas não-conciliados</p>
+                                        <p className="text-xs text-slate-500">Mantém itens finalizados/conciliados. Seguro.</p>
+                                    </div>
+                                </label>
+
+                                <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
+                                    <input
+                                        type="radio"
+                                        name="clearMode"
+                                        value="ALL"
+                                        checked={clearMode === 'ALL'}
+                                        onChange={() => setClearMode('ALL')}
+                                        className="mt-1"
+                                    />
+                                    <div>
+                                        <p className="font-medium text-red-600 dark:text-red-400">Limpar todo o mês</p>
+                                        <p className="text-xs text-slate-500">Remove TUDO (exceto relatórios salvos). Reset total.</p>
+                                    </div>
+                                </label>
+                            </div>
+
+                            <div className="flex justify-end gap-3">
+                                <button
+                                    onClick={() => setClearModalOpen(false)}
+                                    className="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        resetMutation.mutate();
+                                        setClearModalOpen(false);
+                                    }}
+                                    className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg"
+                                >
+                                    Confirmar Limpeza
                                 </button>
                             </div>
                         </div>
