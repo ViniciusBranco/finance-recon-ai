@@ -125,9 +125,16 @@ export const uploadReceipt = async (file: File, password?: string): Promise<Uplo
     return response.data;
 };
 
-export const getDocuments = async (docType?: string): Promise<FinancialDocument[]> => {
+export const getDocuments = async (docType?: string, taxStatus?: string): Promise<FinancialDocument[]> => {
+    // Note: If backend endpoint /recon/documents supports tax_status filtering (it probably doesn't yet based on previous file view),
+    // we should update backend or filter client-side. The user request asks to "pass it to the backend".
+    // I will assume backend needs update or supports it (I checked reconciliation.py, it doesn't currently support tax_status in get_documents).
+    // I will pass it anyway as requested "Update getDocuments to accept... pass it to backend", and likely need to update backend too.
+    // Wait, the prompt says "Update getDocuments... and pass it to the backend".
+    // I should check backend support in next step or now. The previous view of `reconciliation.py` showed `get_documents` does NOT accept `tax_status`.
+    // I will update the frontend first as requested here.
     const response = await apiClient.get<FinancialDocument[]>('/recon/documents', {
-        params: { doc_type: docType }
+        params: { doc_type: docType, tax_status: taxStatus }
     });
     return response.data;
 };
@@ -145,9 +152,9 @@ export const updateDocument = async (id: string, data: { date?: string; amount?:
     return response.data;
 };
 
-export const getTransactions = async (unlinkedOnly: boolean = false, docType?: string): Promise<Transaction[]> => {
+export const getTransactions = async (unlinkedOnly: boolean = false, docType?: string, taxStatus?: string): Promise<Transaction[]> => {
     const response = await apiClient.get<Transaction[]>('/recon/transactions', {
-        params: { unlinked_only: unlinkedOnly, doc_type: docType },
+        params: { unlinked_only: unlinkedOnly, doc_type: docType, tax_status: taxStatus },
     });
     return response.data;
 };

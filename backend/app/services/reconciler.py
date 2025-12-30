@@ -2,6 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from app.db.models import Transaction, FinancialDocument
 from thefuzz import fuzz
+import re
 from datetime import timedelta
 
 from sqlalchemy.orm import selectinload
@@ -52,8 +53,13 @@ class ReconciliationEngine:
                 
                 # Rule 2: Description Fuzzy Match
                 # Compare bank description with merchant name from receipt
+                
+                # Clean Bank Description for better matching
+                # Remove common banking prefixes that add noise
+                clean_bank_desc = re.sub(r"(?i)(PAG\s*BOLETO|PIX\s*QRS|PIX\s*TRANSF|DOC/TED|TRANSF|COMPRA|PAGTO|ENVIO|PIX)", "", bank_txn.merchant_name).strip()
+                
                 name_score = fuzz.token_set_ratio(
-                    bank_txn.merchant_name.lower(), 
+                    clean_bank_desc.lower(), 
                     receipt_txn.merchant_name.lower()
                 ) / 100.0
                 

@@ -274,17 +274,32 @@ def _parse_itau_fast_track(text: str) -> dict | None:
                 data["amount"] = float(val_str)
             except: pass
 
-        # 4. Extração de Favorecido
-        # Tenta capturar linha inteira
-        merch_match = re.search(r"(?:favorecido|beneficiário|nome|destino)[:\s]*([^\n\r]+)", text_lower)
-        if not merch_match:
-            # Pix "Para" pattern
-            merch_match = re.search(r"para\s*\n\s*([^\n\r]+)", text_lower)
+        # 4. Extração de Favorecido (Enhanced)
+        merchant_patterns = [
+            r"(?:nome|raz[ãa]o\s*social)\s*d[oa]\s*benefici[áa]rio[:\s]+([^\n\r]+)",
+            r"(?:favorecido|benefici[áa]rio|destino)[:\s]+([^\n\r]+)",
+            r"para[\n\s]+([a-z0-9\s\.\*]+)" # PIX pattern capturing next line or same line
+        ]
         
+        merch_match = None
+        for pat in merchant_patterns:
+            merch_match = re.search(pat, text_lower, re.IGNORECASE)
+            if merch_match: break
+            
         if merch_match:
             raw_cand = merch_match.group(1).strip().upper()
+            
+            # Clean Masking (***.123.456-**)
+            # We remove the asterisks and the dot/dash separators often associated with partial CPFs
+            # Goal: Keep "ALIGN TECHNOLOGY" but remove "***.000.***"
+            if "*" in raw_cand:
+                # Remove blocks of masking
+                raw_cand = re.sub(r'[\*\.]+\d{3}[\*\.]+', '', raw_cand)
+                raw_cand = raw_cand.replace("*", "")
+            
             # Clean CNPJ/CPF noise if explicit match
             clean_cand = re.split(r"CNPJ|CPF|\d{2}\.|CHAVE", raw_cand)[0].strip()
+            clean_cand = re.sub(r'[\d\.\/-]{11,}', '', clean_cand) # Remove long generic numbers
             clean_cand = clean_cand.strip(" -:.,")
             
             if len(clean_cand) > 3:

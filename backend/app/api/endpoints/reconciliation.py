@@ -2,7 +2,7 @@ import os
 import uuid
 import aiofiles
 import hashlib
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends, Query
 from fastapi.concurrency import run_in_threadpool
 from app.services.processor import process_document
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +10,7 @@ from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 from typing import List
 from app.db.session import get_db
-from app.db.models import FinancialDocument, Transaction
+from app.db.models import FinancialDocument, Transaction, TaxAnalysis
 from app.schemas.document import FinancialDocumentResponse, TransactionResponse
 from app.schemas.match import ManualMatchRequest
 from datetime import date
@@ -146,6 +146,7 @@ async def reconcile_transactions():
 @router.get("/documents", response_model=List[FinancialDocumentResponse])
 async def get_documents(
     doc_type: str | None = None,
+    tax_status: str | None = Query(None, description="Filter by Tax Status (via linked transaction): DEDUCTIBLE, NON_DEDUCTIBLE, PARTIAL"),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -158,6 +159,24 @@ async def get_documents(
     
     if doc_type:
         stmt = stmt.where(FinancialDocument.doc_type == doc_type)
+
+    if tax_status:
+        # Filter documents (receipts) that are linked to a transaction with the given tax status
+        stmt = stmt.join(Transaction, Transaction.receipt_id == FinancialDocument.id)
+        
+        if tax_status == "TO_ANALYZE":
+             # Items that ARE linked (receipt_id joined above) but HAVE NO Tax Analysis
+             stmt = stmt.outerjoin(TaxAnalysis, Transaction.id == TaxAnalysis.transaction_id)
+             stmt = stmt.where(TaxAnalysis.id.is_(None))
+        else:
+             stmt = stmt.join(TaxAnalysis, Transaction.id == TaxAnalysis.transaction_id)
+             
+             if tax_status == "DEDUCTIBLE":
+                stmt = stmt.where(TaxAnalysis.classification == "Dedutível")
+             elif tax_status == "NON_DEDUCTIBLE":
+                stmt = stmt.where(TaxAnalysis.classification == "Não Dedutível")
+             elif tax_status == "PARTIAL":
+                stmt = stmt.where(TaxAnalysis.classification.in_(["Parcialmente Dedutível", "Depende"]))
         
     stmt = stmt.order_by(FinancialDocument.created_at.desc())
     result = await db.execute(stmt)
@@ -181,16 +200,19 @@ async def get_documents(
 async def get_transactions(
     unlinked_only: bool = False,
     doc_type: str | None = None,
+    tax_status: str | None = Query(None, description="Filter by Tax Status: DEDUCTIBLE, NON_DEDUCTIBLE, PARTIAL"),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Fetch all transactions.
     If unlinked_only=True, returns only transactions not yet matched to a receipt.
     If doc_type is provided, filters transactions by their parent document's type.
+    If tax_status is provided, filters by deduced TaxAnalysis classification.
     """
     stmt = (
         select(Transaction)
         .join(FinancialDocument, Transaction.document_id == FinancialDocument.id)
+        .outerjoin(TaxAnalysis, Transaction.id == TaxAnalysis.transaction_id)
         .options(selectinload(Transaction.tax_analysis))
     )
     
@@ -199,6 +221,19 @@ async def get_transactions(
         
     if doc_type:
         stmt = stmt.where(FinancialDocument.doc_type == doc_type)
+
+    if tax_status:
+        if tax_status == "DEDUCTIBLE":
+            stmt = stmt.where(TaxAnalysis.classification == "Dedutível")
+        elif tax_status == "NON_DEDUCTIBLE":
+            stmt = stmt.where(TaxAnalysis.classification == "Não Dedutível")
+        elif tax_status == "PARTIAL":
+            stmt = stmt.where(TaxAnalysis.classification.in_(["Parcialmente Dedutível", "Depende"]))
+        elif tax_status == "TO_ANALYZE":
+             stmt = stmt.where(
+                 Transaction.receipt_id.is_not(None),
+                 TaxAnalysis.id.is_(None)
+             )
         
     stmt = stmt.order_by(Transaction.date.desc())
     result = await db.execute(stmt)

@@ -304,7 +304,10 @@ const DroppableTransaction: React.FC<DroppableTransactionProps> = ({ transaction
                         <span className="text-sm text-slate-500 dark:text-slate-400">{formatDate(tx.date)}</span>
                         <div className="flex items-center gap-2 flex-wrap">
                             {isMatched ? (
-                                <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800">
+                                <div
+                                    className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 text-xs font-medium bg-emerald-100 dark:bg-emerald-900/30 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800 cursor-help"
+                                    title={linkedDoc?.transactions?.[0]?.merchant_name ? `Scanned Merchant: ${linkedDoc.transactions[0].merchant_name}` : undefined}
+                                >
                                     <LinkIcon className="w-3 h-3" />
                                     {linkedDoc ? `Linked` : `Matched (${(tx.match_score! * 100).toFixed(0)}%)`}
                                 </div>
@@ -577,6 +580,7 @@ export const ReconWorkbench: React.FC = () => {
     const [lastReconResult, setLastReconResult] = useState<ReconciliationStats | null>(null);
     const [resetKey, setResetKey] = useState(0);
     const [filter, setFilter] = useState<'ALL' | 'MATCHED' | 'UNLINKED'>('ALL');
+    const [taxFilter, setTaxFilter] = useState<'ALL' | 'DEDUCTIBLE' | 'NON_DEDUCTIBLE' | 'PARTIAL' | 'TO_ANALYZE'>('ALL');
     const [activeDoc, setActiveDoc] = useState<FinancialDocument | null>(null);
 
     // Sorting State
@@ -589,14 +593,14 @@ export const ReconWorkbench: React.FC = () => {
 
     // Fetch Transactions (Bank Feed) - Explicit Type
     const { data: transactions, isLoading: loadingTx, isError: errorTx } = useQuery<Transaction[]>({
-        queryKey: ['transactions', 'BANK_STATEMENT'],
-        queryFn: () => getTransactions(false, 'BANK_STATEMENT'),
+        queryKey: ['transactions', 'BANK_STATEMENT', taxFilter],
+        queryFn: () => getTransactions(false, 'BANK_STATEMENT', taxFilter === 'ALL' ? undefined : taxFilter),
     });
 
     // Fetch Documents (Receipts) - Explicit Type
     const { data: documents, isLoading: loadingDocs, isError: errorDocs } = useQuery<FinancialDocument[]>({
-        queryKey: ['documents', 'RECEIPT'],
-        queryFn: () => getDocuments('RECEIPT'),
+        queryKey: ['documents', 'RECEIPT', taxFilter],
+        queryFn: () => getDocuments('RECEIPT', taxFilter === 'ALL' ? undefined : taxFilter),
     });
 
     // Reconcile Mutation
@@ -921,6 +925,17 @@ export const ReconWorkbench: React.FC = () => {
                                 >
                                     <ArrowUpDown className="w-4 h-4" />
                                 </button>
+                                <select
+                                    value={taxFilter}
+                                    onChange={(e) => setTaxFilter(e.target.value as any)}
+                                    className="text-sm border-slate-200 dark:border-slate-700 rounded-md bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 py-1 px-2 focus:ring-2 focus:ring-blue-500"
+                                >
+                                    <option value="ALL">Todos os Status</option>
+                                    <option value="DEDUCTIBLE">Dedutíveis</option>
+                                    <option value="NON_DEDUCTIBLE">Não Dedutíveis</option>
+                                    <option value="PARTIAL">Análise Requerida</option>
+                                    <option value="TO_ANALYZE">Para Analisar (Conciliados)</option>
+                                </select>
                                 <select
                                     value={filter}
                                     onChange={(e) => setFilter(e.target.value as any)}
